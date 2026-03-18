@@ -222,9 +222,9 @@ class TranslatorWizardApp:
         self.back_button.configure(state="normal" if self.current_step > 0 else "disabled")
 
         if self.current_step == len(self.step_frames) - 1:
-            self.next_button.configure(state="disabled")
+            self.next_button.configure(text="Finalizar", command=self._on_finish, state="normal")
         else:
-            self.next_button.configure(state="normal")
+            self.next_button.configure(text="Próximo", command=self._on_next, state="normal")
 
         if self.current_step == 2:
             ws = engine_workspace_dir(self.engine_var.get(), WORKSPACE_ROOT)
@@ -253,6 +253,9 @@ class TranslatorWizardApp:
                 return
             self._show_step(4)
             return
+
+    def _on_finish(self) -> None:
+        self.root.destroy()
 
     def _on_engine_change(self) -> None:
         engine = normalize_engine(self.engine_var.get())

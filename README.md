@@ -18,6 +18,30 @@ pip install tkinterdnd2
 
 Sem essa dependência, o app continua funcionando normalmente pelo botão de seleção.
 
+## Onde os arquivos de trabalho ficam
+
+- Execução em Python (desenvolvimento): `workspace/` na pasta do projeto
+- Execução em `.exe` (empacotado): `%LOCALAPPDATA%\InterfaceTradutores\workspace`
+
+## Build de EXE (Windows / onedir)
+
+1. Abra PowerShell na raiz do projeto
+2. Rode:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 -Clean
+```
+
+O script instala automaticamente as dependências de build (`PyInstaller` e `tkinterdnd2`) no Python ativo.
+
+Saída esperada:
+
+```text
+dist\InterfaceTradutores\InterfaceTradutores.exe
+```
+
+Para executar o app distribuído, rode o `InterfaceTradutores.exe` dentro da pasta `dist\InterfaceTradutores`.
+
 ## Fluxo no app
 
 1. Escolher engine (`Ren'Py` ou `RPGM`)

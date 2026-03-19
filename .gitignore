@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 workspace/
 .tmp_tests/
+.venv-build/
+build/
+dist/
+*.spec

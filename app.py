@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -27,7 +28,34 @@ except ImportError:
 
 
 APP_DIR = Path(__file__).resolve().parent
-WORKSPACE_ROOT = APP_DIR / "workspace"
+APP_VERSION = "v1.1"
+
+DROP_DISABLED = "disabled"
+DROP_PROJECT_DIR = "project_dir"
+DROP_TRANSLATED_TXT = "translated_txt"
+
+
+def _user_data_dir(app_name: str) -> Path:
+    system = platform.system()
+    if system == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    elif system == "Darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return base / app_name
+
+
+def resolve_workspace_root(*, frozen: bool | None = None) -> Path:
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        return _user_data_dir("InterfaceTradutores") / "workspace"
+    return APP_DIR / "workspace"
+
+
+WORKSPACE_ROOT = resolve_workspace_root()
+WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def open_in_os(path: str | Path) -> None:
@@ -41,6 +69,43 @@ def open_in_os(path: str | Path) -> None:
     subprocess.run(["xdg-open", target], check=False)
 
 
+def normalize_dropped_items(raw_items: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    for raw in raw_items:
+        dropped = raw
+        if dropped.startswith("{") and dropped.endswith("}"):
+            dropped = dropped[1:-1]
+        dropped = dropped.strip()
+        if dropped:
+            paths.append(Path(dropped))
+    return paths
+
+
+def resolve_project_drop_path(paths: list[Path]) -> tuple[Path | None, bool]:
+    for path in paths:
+        if path.exists() and path.is_dir():
+            return path, False
+
+    for path in paths:
+        if path.exists() and path.is_file():
+            return path.parent, True
+
+    if paths:
+        candidate = paths[0]
+        if candidate.suffix:
+            return candidate.parent, True
+        return candidate, False
+
+    return None, False
+
+
+def resolve_translated_txt_drop_path(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.exists() and path.is_file() and path.suffix.lower() == ".txt":
+            return path
+    return None
+
+
 class TranslatorWizardApp:
     def __init__(self) -> None:
         if HAS_DND:
@@ -48,34 +113,65 @@ class TranslatorWizardApp:
         else:
             self.root = tk.Tk()
 
-        self.root.title("Interface Tradutores - V1")
-        self.root.geometry("760x520")
-        self.root.minsize(700, 470)
+        self._configure_style()
+        self.root.title(f"Interface Tradutores - {APP_VERSION}")
+        self.root.geometry("760x540")
+        self.root.minsize(700, 500)
 
         self.engine_var = tk.StringVar(value=ENGINE_RENPY)
+        self.engine_display_var = tk.StringVar(value="")
         self.project_dir_var = tk.StringVar(value="")
         self.translated_file_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Etapa 1/5 - Escolha a engine")
         self.message_var = tk.StringVar(value="Escolha a engine para iniciar.")
+        self.workspace_info_var = tk.StringVar(value=f"Pasta de trabalho base: {WORKSPACE_ROOT}")
+        self.build_info_var = tk.StringVar(value=f"Build: {APP_VERSION}")
 
         self.current_step = 0
+        self.drop_mode = DROP_DISABLED
         self.export_done = False
         self.last_log_file: str | None = None
         self.generated_translation_path: Path | None = None
 
         self._build_layout()
+        self._update_engine_display()
         self._show_step(0)
 
+    def _configure_style(self) -> None:
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"))
+        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
+        style.configure("Engine.TLabel", font=("Segoe UI", 10, "bold"), foreground="#1f3a5f")
+        style.configure("Hint.TLabel", foreground="#335d80")
+        style.configure("TButton", padding=(10, 5))
+
     def _build_layout(self) -> None:
-        container = ttk.Frame(self.root, padding=14)
-        container.pack(fill="both", expand=True)
+        self.container = ttk.Frame(self.root, padding=14)
+        self.container.pack(fill="both", expand=True)
 
-        ttk.Label(
-            container, text="Assistente de Tradução Ren'Py/RPGM", font=("Segoe UI", 14, "bold")
-        ).pack(anchor="w")
-        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(2, 10))
+        ttk.Label(self.container, text="Assistente de Tradução Ren'Py/RPGM", style="Title.TLabel").pack(
+            anchor="w"
+        )
+        ttk.Label(self.container, textvariable=self.engine_display_var, style="Engine.TLabel").pack(
+            anchor="w", pady=(2, 0)
+        )
+        ttk.Label(self.container, textvariable=self.build_info_var, style="Hint.TLabel").pack(
+            anchor="w", pady=(1, 2)
+        )
+        ttk.Label(self.container, textvariable=self.status_var, style="Status.TLabel").pack(
+            anchor="w", pady=(2, 6)
+        )
+        self.step_progress = ttk.Progressbar(
+            self.container, orient="horizontal", mode="determinate", maximum=5
+        )
+        self.step_progress.pack(fill="x")
+        ttk.Label(self.container, textvariable=self.workspace_info_var, style="Hint.TLabel").pack(
+            anchor="w", pady=(6, 10)
+        )
 
-        self.steps_wrap = ttk.Frame(container)
+        self.steps_wrap = ttk.Frame(self.container)
         self.steps_wrap.pack(fill="both", expand=True)
 
         self.step_frames = [
@@ -85,14 +181,13 @@ class TranslatorWizardApp:
             self._build_step_translated_txt(self.steps_wrap),
             self._build_step_import(self.steps_wrap),
         ]
-
         for frame in self.step_frames:
             frame.pack_forget()
 
-        ttk.Separator(container).pack(fill="x", pady=10)
-        ttk.Label(container, textvariable=self.message_var, foreground="#1f3a5f").pack(anchor="w")
+        ttk.Separator(self.container).pack(fill="x", pady=10)
+        ttk.Label(self.container, textvariable=self.message_var, foreground="#1f3a5f").pack(anchor="w")
 
-        nav = ttk.Frame(container)
+        nav = ttk.Frame(self.container)
         nav.pack(fill="x", pady=(10, 0))
         self.back_button = ttk.Button(nav, text="Voltar", command=self._on_back)
         self.back_button.pack(side="left")
@@ -130,20 +225,15 @@ class TranslatorWizardApp:
 
         row = ttk.Frame(frame)
         row.pack(fill="x")
-
-        entry = ttk.Entry(row, textvariable=self.project_dir_var)
-        entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Entry(row, textvariable=self.project_dir_var).pack(
+            side="left", fill="x", expand=True, padx=(0, 8)
+        )
         ttk.Button(row, text="Selecionar pasta", command=self._pick_project_dir).pack(side="left")
 
-        hint = "Você também pode arrastar a pasta para o campo acima." if HAS_DND else (
+        hint = "Você pode arrastar a pasta para qualquer área da janela nesta etapa." if HAS_DND else (
             "Arrastar e soltar indisponível (instale tkinterdnd2 para habilitar)."
         )
         ttk.Label(frame, text=hint).pack(anchor="w", pady=(10, 0))
-
-        if HAS_DND:
-            entry.drop_target_register(DND_FILES)  # type: ignore[union-attr]
-            entry.dnd_bind("<<Drop>>", self._handle_drop)  # type: ignore[union-attr]
-
         return frame
 
     def _build_step_export(self, parent: ttk.Frame) -> ttk.Frame:
@@ -187,21 +277,47 @@ class TranslatorWizardApp:
             side="left"
         )
 
-        ttk.Label(
-            frame,
-            text="Depois de traduzir externamente (ex.: DocTranslator), selecione aqui o TXT final.",
-        ).pack(anchor="w", pady=(10, 0))
+        hint = "Nesta etapa, arraste para a janela apenas arquivo .txt." if HAS_DND else (
+            "Selecione o TXT traduzido pelo botão ao lado."
+        )
+        ttk.Label(frame, text=hint).pack(anchor="w", pady=(10, 0))
         return frame
 
     def _build_step_import(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
         ttk.Label(frame, text="5) Importar tradução no jogo").pack(anchor="w", pady=(2, 12))
-
         ttk.Button(frame, text="Executar importação", command=self._run_import).pack(anchor="w")
         self.open_log_button = ttk.Button(frame, text="Abrir log da importação", command=self._open_log)
         self.open_log_button.pack(anchor="w", pady=(10, 0))
         self.open_log_button.configure(state="disabled")
         return frame
+
+    def _engine_label(self) -> str:
+        return "Ren'Py" if normalize_engine(self.engine_var.get()) == ENGINE_RENPY else "RPGM"
+
+    def _update_engine_display(self) -> None:
+        self.engine_display_var.set(f"Engine selecionada: {self._engine_label()}")
+
+    def _iter_widget_tree(self, root_widget: tk.Misc) -> list[tk.Misc]:
+        items: list[tk.Misc] = [root_widget]
+        for child in root_widget.winfo_children():
+            items.extend(self._iter_widget_tree(child))
+        return items
+
+    def _enable_window_drop(self, widgets: list[tk.Misc]) -> None:
+        if not HAS_DND:
+            return
+        for widget in widgets:
+            try:
+                widget.drop_target_register(DND_FILES)  # type: ignore[union-attr]
+                widget.dnd_bind("<<Drop>>", self._handle_drop)  # type: ignore[union-attr]
+            except Exception:
+                continue
+
+    def _refresh_drop_targets(self) -> None:
+        if not HAS_DND:
+            return
+        self._enable_window_drop(self._iter_widget_tree(self.root))
 
     def _show_step(self, step: int) -> None:
         self.current_step = max(0, min(step, len(self.step_frames) - 1))
@@ -218,7 +334,8 @@ class TranslatorWizardApp:
             "Etapa 4/5 - TXT traduzido",
             "Etapa 5/5 - Importação",
         ]
-        self.status_var.set(titles[self.current_step])
+        self.status_var.set(f"{titles[self.current_step]} | Engine: {self._engine_label()}")
+        self.step_progress.configure(value=self.current_step + 1)
         self.back_button.configure(state="normal" if self.current_step > 0 else "disabled")
 
         if self.current_step == len(self.step_frames) - 1:
@@ -226,9 +343,19 @@ class TranslatorWizardApp:
         else:
             self.next_button.configure(text="Próximo", command=self._on_next, state="normal")
 
+        if self.current_step == 1:
+            self.drop_mode = DROP_PROJECT_DIR
+        elif self.current_step == 3:
+            self.drop_mode = DROP_TRANSLATED_TXT
+        else:
+            self.drop_mode = DROP_DISABLED
+
         if self.current_step == 2:
             ws = engine_workspace_dir(self.engine_var.get(), WORKSPACE_ROOT)
             self.workspace_label.configure(text=f"Pasta de trabalho: {ws}")
+
+        self.workspace_info_var.set(f"Pasta de trabalho base: {WORKSPACE_ROOT}")
+        self._refresh_drop_targets()
 
     def _on_back(self) -> None:
         self._show_step(self.current_step - 1)
@@ -260,19 +387,23 @@ class TranslatorWizardApp:
     def _on_engine_change(self) -> None:
         engine = normalize_engine(self.engine_var.get())
         self.engine_var.set(engine)
+        self._update_engine_display()
         self.export_done = False
         self.generated_translation_path = None
         self.generated_txt_label.configure(text="-")
         self.open_generated_button.configure(state="disabled")
         self.open_generated_folder_button.configure(state="disabled")
         self.translated_file_var.set("")
-        self._set_message("Engine atualizada. Continue para escolher a pasta do projeto.")
+        self._set_message(
+            f"Engine atualizada para {self._engine_label()}. Continue para escolher a pasta do projeto."
+        )
+        self._show_step(self.current_step)
 
     def _pick_project_dir(self) -> None:
         selected = filedialog.askdirectory(title="Selecione a pasta do projeto")
         if selected:
             self.project_dir_var.set(selected)
-            self._set_message("Pasta selecionada.")
+            self._set_message(f"Pasta do projeto definida para {self._engine_label()}.")
 
     def _pick_translated_file(self) -> None:
         selected = filedialog.askopenfilename(
@@ -281,18 +412,38 @@ class TranslatorWizardApp:
         )
         if selected:
             self.translated_file_var.set(selected)
-            self._set_message("Arquivo traduzido selecionado.")
+            self._set_message("Arquivo TXT traduzido selecionado.")
 
     def _handle_drop(self, event: tk.Event) -> None:
         try:
             items = self.root.tk.splitlist(event.data)
-            if not items:
+            paths = normalize_dropped_items(list(items))
+            if not paths:
+                self._set_message("Drop recebido, mas sem caminho válido.")
                 return
-            dropped = items[0]
-            if dropped.startswith("{") and dropped.endswith("}"):
-                dropped = dropped[1:-1]
-            self.project_dir_var.set(dropped)
-            self._set_message("Pasta recebida por arrastar e soltar.")
+
+            if self.drop_mode == DROP_PROJECT_DIR:
+                selected_dir, used_file_parent = resolve_project_drop_path(paths)
+                if selected_dir is None:
+                    self._set_message("Não foi possível identificar uma pasta válida no item arrastado.")
+                    return
+                self.project_dir_var.set(str(selected_dir))
+                if used_file_parent:
+                    self._set_message("Arquivo detectado no drop. Usei automaticamente a pasta dele.")
+                else:
+                    self._set_message("Pasta recebida por arrastar e soltar.")
+                return
+
+            if self.drop_mode == DROP_TRANSLATED_TXT:
+                txt_path = resolve_translated_txt_drop_path(paths)
+                if txt_path is None:
+                    self._set_message("Na etapa 4, solte um arquivo .txt válido.")
+                    return
+                self.translated_file_var.set(str(txt_path))
+                self._set_message(f"TXT traduzido selecionado via drop: {txt_path.name}")
+                return
+
+            self._set_message("Arraste e solte habilitado apenas na etapa 2 (pasta) e etapa 4 (TXT).")
         except Exception as exc:
             self._set_message(f"Falha no arrastar e soltar: {exc}")
 
@@ -305,7 +456,7 @@ class TranslatorWizardApp:
 
     def _validate_translated_file(self) -> bool:
         file_path = Path(self.translated_file_var.get())
-        if not file_path.exists() or not file_path.is_file():
+        if not file_path.exists() or not file_path.is_file() or file_path.suffix.lower() != ".txt":
             messagebox.showerror("Arquivo inválido", "Selecione um arquivo TXT traduzido válido.")
             return False
         return True
@@ -337,7 +488,7 @@ class TranslatorWizardApp:
         if result.warnings:
             details += "\n\n" + "\n".join(f"- {w}" for w in result.warnings)
         messagebox.showinfo("Exportação concluída", details)
-        self._set_message("Exportação concluída. Agora traduza e selecione o TXT final.")
+        self._set_message(f"Exportação {self._engine_label()} concluída. Agora traduza e selecione o TXT final.")
 
     def _open_generated_txt(self) -> None:
         if not self.generated_translation_path:
@@ -404,7 +555,7 @@ class TranslatorWizardApp:
             details += "\n\nAlertas:\n" + "\n".join(f"- {w}" for w in result.warnings)
 
         messagebox.showinfo("Importação concluída", details)
-        self._set_message("Importação finalizada com sucesso.")
+        self._set_message(f"Importação {self._engine_label()} finalizada com sucesso.")
 
     def _open_log(self) -> None:
         if not self.last_log_file:

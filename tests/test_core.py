@@ -22,8 +22,9 @@ class CoreWorkflowTests(unittest.TestCase):
 
     def test_renpy_export_and_import(self) -> None:
         project = self.root / "renpy_game"
-        project.mkdir(parents=True)
-        script_path = project / "script.rpy"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
         script_path.write_text(
             '# "Hello [player]"\n'
             'e "Hello [player]"\n',
@@ -82,8 +83,9 @@ class CoreWorkflowTests(unittest.TestCase):
 
     def test_pre_validation_warns_on_count_mismatch(self) -> None:
         project = self.root / "renpy_game_warning"
-        project.mkdir(parents=True)
-        script_path = project / "script.rpy"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
         script_path.write_text(
             '# "Hello [player]"\n'
             'e "Hello [player]"\n',

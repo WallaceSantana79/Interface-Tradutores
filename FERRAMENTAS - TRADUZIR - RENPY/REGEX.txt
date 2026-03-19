@@ -1,0 +1,16 @@
+Aspas duplas dentro de aspas duplas: (".*?)(?<!\\)"(.*?)(?<!\\)"(.*?")
+$1'$2'$3
+
+Aspas duplas no final: ""\s*$
+"
+
+Sonoros que geralmente traduzem mal: 'sorver' 'sopro'
+'slurp'
+
+Palavras para ter atenção:
+ó-claro
+t-confio
+s-lembra
+
+As vezes aparentemente a tradução pode colocar:
+vc no lugar de você

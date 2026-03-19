@@ -21,6 +21,41 @@ def expected_workspace_files() -> list[str]:
     return [TRANSLATIONS_FILENAME, PLACEHOLDERS_FILENAME, MAP_FILENAME]
 
 
+def resolve_renpy_portuguese_dir(project_dir: str | Path) -> Path | None:
+    project = Path(project_dir)
+    candidates = [
+        project / "game" / "tl" / "portuguese",
+        project / "tl" / "portuguese",
+        project / "portuguese" if project.name.lower() == "tl" else None,
+    ]
+
+    if project.name.lower() == "portuguese" and project.parent.name.lower() == "tl":
+        candidates.append(project)
+
+    for candidate in candidates:
+        if candidate and candidate.exists() and candidate.is_dir():
+            return candidate
+
+    return None
+
+
+def _collect_renpy_files(project: Path) -> list[Path]:
+    # O fluxo Ren'Py deve trabalhar somente em game/tl/portuguese (ou equivalente se o
+    # usuário selecionar game/ ou tl/ diretamente), sem alterar game/*.rpy nem renpy/common.
+    tl_portuguese_dir = resolve_renpy_portuguese_dir(project)
+    if not tl_portuguese_dir:
+        return []
+
+    files: list[Path] = []
+    for p in tl_portuguese_dir.rglob("*.rpy"):
+        if not p.is_file() or p.name in IGNORAR_ARQUIVOS:
+            continue
+        files.append(p)
+
+    files.sort(key=lambda p: str(p).lower())
+    return files
+
+
 def proteger_placeholders(texto: str) -> tuple[str, list[str]]:
     pattern = r"(\[.*?\]|%[sd]|{\#.*?}|\{/?[a-zA-Z0-9_]+(?:=[^}]+)?\})"
 
@@ -310,14 +345,7 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
     project = Path(project_dir)
     workspace = ensure_directory(workspace_dir)
 
-    arquivos_rpy = sorted(
-        [
-            p
-            for p in project.rglob("*.rpy")
-            if p.is_file() and p.name not in IGNORAR_ARQUIVOS
-        ],
-        key=lambda p: str(p).lower(),
-    )
+    arquivos_rpy = _collect_renpy_files(project)
 
     if not arquivos_rpy:
         return JobResult(
@@ -325,14 +353,13 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
             message="Nenhum arquivo .rpy encontrado na pasta selecionada.",
         )
 
-    dict_txt: dict[str, list[str]] = {}
-    dict_placeh: dict[str, list[list[str]]] = {}
+    export_entries: list[tuple[str, list[str], list[list[str]]]] = []
 
     for caminho in arquivos_rpy:
         textos, phs_list = extrair_textos(caminho)
         if textos:
-            dict_txt[caminho.name] = textos
-            dict_placeh[caminho.name] = phs_list
+            relpath = caminho.relative_to(project).as_posix()
+            export_entries.append((relpath, textos, phs_list))
 
     mapa_arquivos: dict[str, str] = {}
     translations_path = workspace / TRANSLATIONS_FILENAME
@@ -342,9 +369,9 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
     with translations_path.open("w", encoding="utf-8-sig") as f_txt, placeholders_path.open(
         "w", encoding="utf-8-sig"
     ) as f_ph:
-        for i, (arq, textos) in enumerate(dict_txt.items()):
+        for i, (relpath, textos, placeholders) in enumerate(export_entries):
             chave_arquivo = f"ARQUIVO_{i:03d}"
-            mapa_arquivos[chave_arquivo] = arq
+            mapa_arquivos[chave_arquivo] = relpath
 
             f_txt.write(f"=== {chave_arquivo} ===\n")
             for idx_t, texto in enumerate(textos):
@@ -354,7 +381,7 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
             f_txt.write("\n\n")
 
             f_ph.write(f"=== {chave_arquivo} ===\n")
-            for phs in dict_placeh[arq]:
+            for phs in placeholders:
                 f_ph.write("|||".join(phs) + "\n")
             f_ph.write("\n")
 
@@ -363,7 +390,7 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
 
     return JobResult(
         success=True,
-        message=f"Exportação Ren'Py concluída ({len(dict_txt)} arquivos).",
+        message=f"Exportação Ren'Py concluída ({len(export_entries)} arquivos).",
         generated_files=[str(translations_path), str(placeholders_path), str(map_path)],
     )
 
@@ -394,40 +421,32 @@ def importar_renpy(
     with map_path.open("r", encoding="utf-8") as f_map:
         mapa_arquivos: dict[str, str] = json.load(f_map)
 
-    arq_to_chave = {v: k for k, v in mapa_arquivos.items()}
     warnings: list[str] = []
 
-    arquivos_rpy = sorted(
-        [
-            p
-            for p in project.rglob("*.rpy")
-            if p.is_file() and p.name not in IGNORAR_ARQUIVOS
-        ],
-        key=lambda p: str(p).lower(),
-    )
-
     targets: list[Path] = []
-    for full in arquivos_rpy:
-        chave = arq_to_chave.get(full.name)
-        if chave and chave in t_map:
+    key_to_target: dict[str, Path] = {}
+    for chave, relpath in mapa_arquivos.items():
+        full = (project / relpath).resolve()
+        if full.exists() and full.is_file():
             targets.append(full)
+            key_to_target[chave] = full
+        else:
+            warnings.append(f"Arquivo mapeado não encontrado no projeto: {relpath}")
 
     backup_dir: Path | None = None
     if criar_backup and targets:
         backup_dir = create_backup_snapshot("renpy", project, workspace, targets)
 
     with log_path.open("w", encoding="utf-8") as log:
-        for full in arquivos_rpy:
-            chave = arq_to_chave.get(full.name)
-
-            if not chave or chave not in t_map:
-                aviso = f"{full.name} não foi processado (sem chave no mapa/traduções)."
+        for chave, full in key_to_target.items():
+            if chave not in t_map:
+                aviso = f"{full} não foi processado (sem traduções para a chave {chave})."
                 warnings.append(aviso)
                 log.write(f"[AVISO] {aviso}\n")
                 continue
 
             if chave not in p_map:
-                aviso = f"{full.name} não encontrou mapa de placeholders."
+                aviso = f"{full} não encontrou mapa de placeholders."
                 warnings.append(aviso)
                 log.write(f"[ERRO GRAVE] {aviso}\n")
                 p_tags: list[list[str]] = []
@@ -435,7 +454,7 @@ def importar_renpy(
                 p_tags = p_map[chave]
                 if len(t_map[chave]) != len(p_tags):
                     alerta = (
-                        f"{full.name}: {len(t_map[chave])} traduções vs {len(p_tags)} placeholders."
+                        f"{full}: {len(t_map[chave])} traduções vs {len(p_tags)} placeholders."
                     )
                     warnings.append(alerta)
                     log.write(f"[ALERTA DE DESVIO] {alerta}\n")

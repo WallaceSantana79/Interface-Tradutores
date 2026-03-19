@@ -11,6 +11,7 @@ from .renpy_core import (
     carregar_traducoes_global as renpy_load_translations,
     exportar_renpy,
     importar_renpy,
+    resolve_renpy_portuguese_dir,
 )
 from .rpgm_core import (
     MAP_FILENAME as RPGM_MAP,
@@ -45,9 +46,18 @@ def _validate_project_directory(engine: str, project_dir: Path) -> JobResult:
         return JobResult(False, f"Pasta de projeto inválida: {project_dir}")
 
     if engine == ENGINE_RENPY:
-        has_files = any(p.is_file() for p in project_dir.rglob("*.rpy"))
+        tl_portuguese = resolve_renpy_portuguese_dir(project_dir)
+        if tl_portuguese is None:
+            return JobResult(
+                False,
+                "Pasta Ren'Py inválida: não encontrei game/tl/portuguese.",
+            )
+        has_files = any(p.is_file() for p in tl_portuguese.rglob("*.rpy"))
         if not has_files:
-            return JobResult(False, "Pasta Ren'Py inválida: nenhum arquivo .rpy encontrado.")
+            return JobResult(
+                False,
+                "Pasta Ren'Py inválida: game/tl/portuguese não possui arquivos .rpy.",
+            )
     elif engine == ENGINE_RPGM:
         has_files = any(p.is_file() for p in project_dir.glob("*.json"))
         if not has_files:

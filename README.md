@@ -45,10 +45,31 @@ Para executar o app distribuído, rode o `InterfaceTradutores.exe` dentro da pas
 ## Fluxo no app
 
 1. Escolher engine (`Ren'Py` ou `RPGM`)
-2. Selecionar pasta do projeto
-3. Executar exportação
-4. Traduzir externamente e selecionar o TXT final
-5. Executar importação (com pergunta de backup)
+2. Selecionar pasta do projeto (com suporte a arrastar e soltar)
+3. (Ren'Py) opcional: detectar versão, executar UnRen e abrir launcher compatível
+4. Executar exportação
+5. Traduzir externamente e selecionar o TXT final
+6. Executar importação (com pergunta de backup)
+
+## Preparação Ren'Py (V1.2)
+
+Na etapa 2, quando a engine selecionada é Ren'Py, existe um painel extra de preparação:
+
+- `Detectar versão`: tenta encontrar a versão lendo `renpy/version.py`, `renpy/__init__.py` e `log.txt`.
+- `Executar UnRen`: copia `UnRen-forall.bat` para a raiz do jogo, abre em modo interativo e remove o BAT temporário ao avançar etapa.
+- `Reverificar launchers`: procura versões em uma pasta configurada no padrão `renpy-<versão>-sdk`, com `renpy.exe` na raiz.
+- `Abrir launcher`: abre o `renpy.exe` compatível com a versão detectada (mesmo `major.minor`, patch mais próximo).
+- `Selecionar launcher manual`: fallback quando não há compatível automático.
+
+Após importar no Ren'Py, o app tenta copiar `force_language.rpy` para `...\game\force_language.rpy`.
+
+Observação de segurança:
+
+- Se você selecionar a raiz do jogo (com `game/` e `renpy/`), o export/import processa apenas `game/tl/portuguese` e não altera `game/*.rpy` nem `renpy/common`.
+
+As configurações persistentes ficam em:
+
+- `%LOCALAPPDATA%\InterfaceTradutores\settings.json`
 
 ## Scripts legados (compatibilidade)
 

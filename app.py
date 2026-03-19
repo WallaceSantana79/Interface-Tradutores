@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tkinter as tk
@@ -16,6 +18,19 @@ from translator_core.orchestrator import (
     normalize_engine,
     translation_filename_for_engine,
 )
+from translator_core.renpy_prepare import (
+    aplicar_force_language,
+    abrir_processo_jogo,
+    copiar_un_files_para_game,
+    detectar_executavel_jogo,
+    detectar_versao_renpy,
+    listar_launchers,
+    preparar_descompactador,
+    processo_ativo,
+    remover_un_files_de_game,
+    remover_descompactador_temporario,
+    selecionar_launcher_compativel,
+)
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -28,11 +43,15 @@ except ImportError:
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.3"
+APP_DEFAULT_GEOMETRY = "780x560"
+APP_BASE_MIN_SIZE = (700, 500)
+APP_RENPY_STEP2_MIN_SIZE = (760, 680)
 
 DROP_DISABLED = "disabled"
 DROP_PROJECT_DIR = "project_dir"
 DROP_TRANSLATED_TXT = "translated_txt"
+MANUAL_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 
 
 def _user_data_dir(app_name: str) -> Path:
@@ -44,6 +63,21 @@ def _user_data_dir(app_name: str) -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
     return base / app_name
+
+
+SETTINGS_PATH = _user_data_dir("InterfaceTradutores") / "settings.json"
+DEFAULT_UNREN_SOURCE = (
+    r"C:\Users\velos\Documents\Exportador-Importador-Renpy\FERRAMENTAS - TRADUZIR - RENPY\UnRen-forall.bat"
+)
+DEFAULT_FORCE_LANGUAGE = (
+    r"C:\Users\velos\Documents\Exportador-Importador-Renpy\FERRAMENTAS - TRADUZIR - RENPY\force_language.rpy"
+)
+DEFAULT_UN_RPY_SOURCE = (
+    r"C:\Users\velos\Documents\Interface-Tradutores\FERRAMENTAS - TRADUZIR - RENPY\un.rpy"
+)
+DEFAULT_UN_RPYC_SOURCE = (
+    r"C:\Users\velos\Documents\Interface-Tradutores\FERRAMENTAS - TRADUZIR - RENPY\un.rpyc"
+)
 
 
 def resolve_workspace_root(*, frozen: bool | None = None) -> Path:
@@ -106,6 +140,42 @@ def resolve_translated_txt_drop_path(paths: list[Path]) -> Path | None:
     return None
 
 
+def _default_settings() -> dict[str, str]:
+    return {
+        "launchers_root": "",
+        "unren_source_path": DEFAULT_UNREN_SOURCE,
+        "force_language_path": DEFAULT_FORCE_LANGUAGE,
+        "un_rpy_source_path": DEFAULT_UN_RPY_SOURCE,
+        "un_rpyc_source_path": DEFAULT_UN_RPYC_SOURCE,
+    }
+
+
+def load_app_settings() -> dict[str, str]:
+    settings = _default_settings()
+    if not SETTINGS_PATH.exists() or not SETTINGS_PATH.is_file():
+        return settings
+
+    try:
+        loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return settings
+
+    for key in settings:
+        value = loaded.get(key)
+        if isinstance(value, str):
+            settings[key] = value
+
+    return settings
+
+
+def save_app_settings(settings: dict[str, str]) -> None:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_PATH.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 class TranslatorWizardApp:
     def __init__(self) -> None:
         if HAS_DND:
@@ -115,13 +185,28 @@ class TranslatorWizardApp:
 
         self._configure_style()
         self.root.title(f"Interface Tradutores - {APP_VERSION}")
-        self.root.geometry("760x540")
-        self.root.minsize(700, 500)
+        self.root.geometry(APP_DEFAULT_GEOMETRY)
+        self.root.minsize(*APP_BASE_MIN_SIZE)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
+        self.settings = load_app_settings()
         self.engine_var = tk.StringVar(value=ENGINE_RENPY)
         self.engine_display_var = tk.StringVar(value="")
         self.project_dir_var = tk.StringVar(value="")
         self.translated_file_var = tk.StringVar(value="")
+        self.launchers_root_var = tk.StringVar(value=self.settings["launchers_root"])
+        self.unren_source_var = tk.StringVar(value=self.settings["unren_source_path"])
+        self.force_language_source_var = tk.StringVar(value=self.settings["force_language_path"])
+        self.un_rpy_source_var = tk.StringVar(value=self.settings["un_rpy_source_path"])
+        self.un_rpyc_source_var = tk.StringVar(value=self.settings["un_rpyc_source_path"])
+        self.renpy_version_var = tk.StringVar(value="Versão Ren'Py detectada: -")
+        self.renpy_launcher_var = tk.StringVar(value="Launcher Ren'Py: -")
+        self.manual_version_var = tk.StringVar(value="")
+        self.renpy_launchers_root_info_var = tk.StringVar(value="")
+        self.unren_source_info_var = tk.StringVar(value="")
+        self.force_language_info_var = tk.StringVar(value="")
+        self.un_rpy_info_var = tk.StringVar(value="")
+        self.un_rpyc_info_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Etapa 1/5 - Escolha a engine")
         self.message_var = tk.StringVar(value="Escolha a engine para iniciar.")
         self.workspace_info_var = tk.StringVar(value=f"Pasta de trabalho base: {WORKSPACE_ROOT}")
@@ -132,8 +217,16 @@ class TranslatorWizardApp:
         self.export_done = False
         self.last_log_file: str | None = None
         self.generated_translation_path: Path | None = None
+        self.detected_renpy_version: str | None = None
+        self.selected_launcher_path: Path | None = None
+        self.unren_temp_bat_path: Path | None = None
+        self.unren_temp_should_remove = False
+        self.game_process: subprocess.Popen[bytes] | None = None
+        self.game_process_mode: str | None = None
+        self.running_game_exe: Path | None = None
 
         self._build_layout()
+        self._refresh_renpy_settings_labels()
         self._update_engine_display()
         self._show_step(0)
 
@@ -225,15 +318,162 @@ class TranslatorWizardApp:
 
         row = ttk.Frame(frame)
         row.pack(fill="x")
-        ttk.Entry(row, textvariable=self.project_dir_var).pack(
-            side="left", fill="x", expand=True, padx=(0, 8)
+        self.project_dir_entry = ttk.Entry(row, textvariable=self.project_dir_var)
+        self.project_dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.pick_project_dir_button = ttk.Button(
+            row, text="Selecionar pasta", command=self._pick_project_dir
         )
-        ttk.Button(row, text="Selecionar pasta", command=self._pick_project_dir).pack(side="left")
+        self.pick_project_dir_button.pack(side="left")
 
         hint = "Você pode arrastar a pasta para qualquer área da janela nesta etapa." if HAS_DND else (
             "Arrastar e soltar indisponível (instale tkinterdnd2 para habilitar)."
         )
         ttk.Label(frame, text=hint).pack(anchor="w", pady=(10, 0))
+
+        self.renpy_prepare_frame = ttk.LabelFrame(frame, text="Preparação Ren'Py (pré-fluxo)")
+        self.renpy_prepare_frame.pack(fill="x", pady=(14, 0))
+        self.renpy_prepare_visible = True
+
+        ttk.Label(self.renpy_prepare_frame, textvariable=self.renpy_version_var).pack(
+            anchor="w", pady=(6, 2), padx=8
+        )
+        manual_version_row = ttk.Frame(self.renpy_prepare_frame)
+        manual_version_row.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Entry(manual_version_row, textvariable=self.manual_version_var, width=18).pack(
+            side="left", padx=(0, 8)
+        )
+        self.manual_version_button = ttk.Button(
+            manual_version_row,
+            text="Usar versão manual",
+            command=self._apply_manual_version,
+        )
+        self.manual_version_button.pack(side="left")
+        ttk.Label(self.renpy_prepare_frame, textvariable=self.renpy_launcher_var).pack(
+            anchor="w", pady=(0, 8), padx=8
+        )
+
+        btn_row = ttk.Frame(self.renpy_prepare_frame)
+        btn_row.pack(fill="x", padx=8)
+        self.detect_version_button = ttk.Button(
+            btn_row, text="Detectar versão", command=self._detect_renpy_version
+        )
+        self.detect_version_button.pack(side="left", padx=(0, 8), pady=(0, 8))
+        self.refresh_launchers_button = ttk.Button(
+            btn_row, text="Reverificar launchers", command=self._refresh_launchers
+        )
+        self.refresh_launchers_button.pack(side="left", padx=(0, 8), pady=(0, 8))
+        self.pick_launcher_button = ttk.Button(
+            btn_row, text="Selecionar launcher manual", command=self._pick_launcher_manually
+        )
+        self.pick_launcher_button.pack(side="left", padx=(0, 8), pady=(0, 8))
+        self.open_launcher_button = ttk.Button(
+            btn_row, text="Abrir launcher", command=self._open_selected_launcher
+        )
+        self.open_launcher_button.pack(side="left", pady=(0, 8))
+        self.open_launcher_button.configure(state="disabled")
+
+        btn_row2 = ttk.Frame(self.renpy_prepare_frame)
+        btn_row2.pack(fill="x", padx=8)
+        self.run_unren_button = ttk.Button(
+            btn_row2, text="Executar UnRen", command=self._run_unren
+        )
+        self.run_unren_button.pack(side="left", padx=(0, 8), pady=(0, 8))
+        self.open_game_prepare_button = ttk.Button(
+            btn_row2, text="Abrir jogo (preparar)", command=self._run_open_game_prepare
+        )
+        self.open_game_prepare_button.pack(side="left", padx=(0, 8), pady=(0, 8))
+        self.run_un_cycle_button = ttk.Button(
+            btn_row2,
+            text="Descompilar rpyc (un.rpy + un.rpyc)",
+            command=self._run_un_rpyc_cycle,
+        )
+        self.run_un_cycle_button.pack(side="left", pady=(0, 8))
+
+        config_row = ttk.Frame(self.renpy_prepare_frame)
+        config_row.pack(fill="x", padx=8)
+        ttk.Label(config_row, textvariable=self.renpy_launchers_root_info_var).pack(
+            side="left", fill="x", expand=True, pady=(0, 6)
+        )
+        self.pick_launchers_root_button = ttk.Button(
+            config_row,
+            text="Configurar pasta dos launchers",
+            command=self._pick_launchers_root,
+        )
+        self.pick_launchers_root_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+
+        unren_row = ttk.Frame(self.renpy_prepare_frame)
+        unren_row.pack(fill="x", padx=8)
+        ttk.Label(unren_row, textvariable=self.unren_source_info_var).pack(
+            side="left", fill="x", expand=True, pady=(0, 6)
+        )
+        self.pick_unren_source_button = ttk.Button(
+            unren_row,
+            text="Configurar UnRen",
+            command=self._pick_unren_source,
+        )
+        self.pick_unren_source_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+
+        force_row = ttk.Frame(self.renpy_prepare_frame)
+        force_row.pack(fill="x", padx=8)
+        ttk.Label(force_row, textvariable=self.force_language_info_var).pack(
+            side="left", fill="x", expand=True, pady=(0, 6)
+        )
+        self.pick_force_language_button = ttk.Button(
+            force_row,
+            text="Configurar force_language",
+            command=self._pick_force_language_source,
+        )
+        self.pick_force_language_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+
+        un_rpy_row = ttk.Frame(self.renpy_prepare_frame)
+        un_rpy_row.pack(fill="x", padx=8)
+        ttk.Label(un_rpy_row, textvariable=self.un_rpy_info_var).pack(
+            side="left", fill="x", expand=True, pady=(0, 6)
+        )
+        self.pick_un_rpy_button = ttk.Button(
+            un_rpy_row,
+            text="Configurar un.rpy",
+            command=self._pick_un_rpy_source,
+        )
+        self.pick_un_rpy_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+
+        un_rpyc_row = ttk.Frame(self.renpy_prepare_frame)
+        un_rpyc_row.pack(fill="x", padx=8)
+        ttk.Label(un_rpyc_row, textvariable=self.un_rpyc_info_var).pack(
+            side="left", fill="x", expand=True, pady=(0, 6)
+        )
+        self.pick_un_rpyc_button = ttk.Button(
+            un_rpyc_row,
+            text="Configurar un.rpyc",
+            command=self._pick_un_rpyc_source,
+        )
+        self.pick_un_rpyc_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+
+        self.renpy_prepare_hint = ttk.Label(
+            self.renpy_prepare_frame,
+            text=(
+                "No Ren'Py: abra o jogo para preparar, rode o ciclo un.rpy/un.rpyc quando necessário, "
+                "execute UnRen e abra o launcher compatível."
+            ),
+            style="Hint.TLabel",
+        )
+        self.renpy_prepare_hint.pack(anchor="w", padx=8, pady=(0, 8))
+
+        self.renpy_prepare_buttons = [
+            self.detect_version_button,
+            self.manual_version_button,
+            self.refresh_launchers_button,
+            self.pick_launcher_button,
+            self.open_launcher_button,
+            self.run_unren_button,
+            self.open_game_prepare_button,
+            self.run_un_cycle_button,
+            self.pick_launchers_root_button,
+            self.pick_unren_source_button,
+            self.pick_force_language_button,
+            self.pick_un_rpy_button,
+            self.pick_un_rpyc_button,
+        ]
         return frame
 
     def _build_step_export(self, parent: ttk.Frame) -> ttk.Frame:
@@ -298,6 +538,538 @@ class TranslatorWizardApp:
     def _update_engine_display(self) -> None:
         self.engine_display_var.set(f"Engine selecionada: {self._engine_label()}")
 
+    def _refresh_renpy_settings_labels(self) -> None:
+        launchers_root = self.launchers_root_var.get().strip() or "(não definida)"
+        unren_source = self.unren_source_var.get().strip() or "(não definido)"
+        force_source = self.force_language_source_var.get().strip() or "(não definido)"
+        un_rpy_source = self.un_rpy_source_var.get().strip() or "(não definido)"
+        un_rpyc_source = self.un_rpyc_source_var.get().strip() or "(não definido)"
+        self.renpy_launchers_root_info_var.set(f"Pasta de versões Ren'Py: {launchers_root}")
+        self.unren_source_info_var.set(f"Fonte UnRen: {unren_source}")
+        self.force_language_info_var.set(f"Fonte force_language: {force_source}")
+        self.un_rpy_info_var.set(f"Fonte un.rpy: {un_rpy_source}")
+        self.un_rpyc_info_var.set(f"Fonte un.rpyc: {un_rpyc_source}")
+
+    def _save_settings(self) -> None:
+        self.settings["launchers_root"] = self.launchers_root_var.get().strip()
+        self.settings["unren_source_path"] = self.unren_source_var.get().strip()
+        self.settings["force_language_path"] = self.force_language_source_var.get().strip()
+        self.settings["un_rpy_source_path"] = self.un_rpy_source_var.get().strip()
+        self.settings["un_rpyc_source_path"] = self.un_rpyc_source_var.get().strip()
+        save_app_settings(self.settings)
+        self._refresh_renpy_settings_labels()
+
+    def _refresh_renpy_prepare_ui_state(self) -> None:
+        is_renpy = normalize_engine(self.engine_var.get()) == ENGINE_RENPY
+        game_busy = self._game_running()
+
+        if is_renpy and not self.renpy_prepare_visible:
+            self.renpy_prepare_frame.pack(fill="x", pady=(14, 0))
+            self.renpy_prepare_visible = True
+        if not is_renpy and self.renpy_prepare_visible:
+            self.renpy_prepare_frame.pack_forget()
+            self.renpy_prepare_visible = False
+
+        for button in self.renpy_prepare_buttons:
+            button.configure(state="normal" if (is_renpy and not game_busy) else "disabled")
+        self.project_dir_entry.configure(state="normal" if not game_busy else "disabled")
+        self.pick_project_dir_button.configure(state="normal" if not game_busy else "disabled")
+        self.back_button.configure(state="disabled" if game_busy else ("normal" if self.current_step > 0 else "disabled"))
+        self.next_button.configure(state="disabled" if game_busy else "normal")
+
+        if not is_renpy:
+            self.root.minsize(*APP_BASE_MIN_SIZE)
+            self.renpy_prepare_hint.configure(
+                text="Pré-fluxo disponível apenas para Ren'Py. Para RPGM, siga o fluxo normal."
+            )
+            self.open_launcher_button.configure(state="disabled")
+            return
+
+        if self.current_step == 1:
+            min_w, min_h = APP_RENPY_STEP2_MIN_SIZE
+            self.root.minsize(min_w, min_h)
+            self.root.update_idletasks()
+            if self.root.winfo_width() < min_w or self.root.winfo_height() < min_h:
+                self.root.geometry(
+                    f"{max(self.root.winfo_width(), min_w)}x{max(self.root.winfo_height(), min_h)}"
+                )
+        else:
+            self.root.minsize(*APP_BASE_MIN_SIZE)
+
+        if game_busy:
+            exe_name = self.running_game_exe.name if self.running_game_exe else "jogo"
+            self.renpy_prepare_hint.configure(
+                text=(
+                    f"{exe_name} está em execução. Feche o jogo para concluir esta preparação e liberar os botões."
+                )
+            )
+        else:
+            self.renpy_prepare_hint.configure(
+                text=(
+                    "No Ren'Py: abra o jogo para preparar, rode o ciclo un.rpy/un.rpyc quando necessário, "
+                    "execute UnRen e abra o launcher compatível."
+                )
+            )
+        self.open_launcher_button.configure(
+            state=(
+                "normal"
+                if (
+                    not game_busy
+                    and self.selected_launcher_path
+                    and self.selected_launcher_path.exists()
+                )
+                else "disabled"
+            )
+        )
+
+    def _set_selected_launcher(
+        self,
+        launcher_path: Path | None,
+        *,
+        version_label: str | None = None,
+    ) -> None:
+        self.selected_launcher_path = launcher_path
+        if launcher_path is None:
+            self.renpy_launcher_var.set("Launcher Ren'Py: -")
+            self.open_launcher_button.configure(state="disabled")
+            return
+
+        version_prefix = f"[{version_label}] " if version_label else ""
+        self.renpy_launcher_var.set(f"Launcher Ren'Py: {version_prefix}{launcher_path}")
+        self._refresh_renpy_prepare_ui_state()
+
+    def _pick_launchers_root(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para alterar a pasta dos launchers.")
+            return
+        selected = filedialog.askdirectory(title="Selecione a pasta com versões Ren'Py")
+        if not selected:
+            return
+        self.launchers_root_var.set(selected)
+        self._save_settings()
+        self._refresh_launchers(show_status=False)
+        self._set_message("Pasta dos launchers atualizada.")
+
+    def _pick_unren_source(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para alterar a fonte do UnRen.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecione o UnRen (.bat ou .txt)",
+            filetypes=[("Batch ou Texto", "*.bat *.txt"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        self.unren_source_var.set(selected)
+        self._save_settings()
+        self._set_message("Fonte do UnRen atualizada.")
+
+    def _pick_force_language_source(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para alterar o force_language.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecione o force_language.rpy",
+            filetypes=[("Ren'Py script", "*.rpy"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        self.force_language_source_var.set(selected)
+        self._save_settings()
+        self._set_message("Fonte do force_language atualizada.")
+
+    def _pick_un_rpy_source(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para alterar a fonte un.rpy.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecione o arquivo un.rpy",
+            filetypes=[("Ren'Py script", "*.rpy"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        self.un_rpy_source_var.set(selected)
+        self._save_settings()
+        self._set_message("Fonte un.rpy atualizada.")
+
+    def _pick_un_rpyc_source(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para alterar a fonte un.rpyc.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecione o arquivo un.rpyc",
+            filetypes=[("Ren'Py compiled", "*.rpyc"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        self.un_rpyc_source_var.set(selected)
+        self._save_settings()
+        self._set_message("Fonte un.rpyc atualizada.")
+
+    def _project_path_if_valid(self) -> Path | None:
+        project = Path(self.project_dir_var.get())
+        if not project.exists() or not project.is_dir():
+            return None
+        return project
+
+    def _ensure_renpy_project_ready(self) -> bool:
+        if normalize_engine(self.engine_var.get()) != ENGINE_RENPY:
+            self._set_message("Essa ação está disponível apenas para Ren'Py.")
+            return False
+        return self._validate_project_dir()
+
+    def _resolve_game_executable(self) -> Path | None:
+        project = self._project_path_if_valid()
+        if project is None:
+            return None
+
+        auto_detected = detectar_executavel_jogo(project)
+        if auto_detected and auto_detected.exists():
+            return auto_detected
+
+        selected = filedialog.askopenfilename(
+            title="Selecione o executável principal do jogo",
+            initialdir=str(project),
+            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return None
+
+        exe_path = Path(selected)
+        if exe_path.suffix.lower() != ".exe":
+            messagebox.showerror("Executável inválido", "Selecione um arquivo .exe válido.")
+            return None
+        if not exe_path.exists() or not exe_path.is_file():
+            messagebox.showerror("Executável inválido", f"Arquivo não encontrado: {exe_path}")
+            return None
+        return exe_path
+
+    def _ensure_un_sources(self) -> tuple[Path, Path] | None:
+        un_rpy = Path(self.un_rpy_source_var.get().strip())
+        un_rpyc = Path(self.un_rpyc_source_var.get().strip())
+
+        if not un_rpy.exists() or not un_rpy.is_file():
+            self._set_message("Fonte un.rpy não encontrada. Selecione manualmente.")
+            selected = filedialog.askopenfilename(
+                title="Selecione o arquivo un.rpy",
+                filetypes=[("Ren'Py script", "*.rpy"), ("Todos os arquivos", "*.*")],
+            )
+            if not selected:
+                return None
+            un_rpy = Path(selected)
+            self.un_rpy_source_var.set(str(un_rpy))
+            self._save_settings()
+
+        if not un_rpyc.exists() or not un_rpyc.is_file():
+            self._set_message("Fonte un.rpyc não encontrada. Selecione manualmente.")
+            selected = filedialog.askopenfilename(
+                title="Selecione o arquivo un.rpyc",
+                filetypes=[("Ren'Py compiled", "*.rpyc"), ("Todos os arquivos", "*.*")],
+            )
+            if not selected:
+                return None
+            un_rpyc = Path(selected)
+            self.un_rpyc_source_var.set(str(un_rpyc))
+            self._save_settings()
+
+        return (un_rpy, un_rpyc)
+
+    def _game_running(self) -> bool:
+        return processo_ativo(self.game_process)
+
+    def _start_game_process(self, *, exe_path: Path, mode: str, started_message: str) -> bool:
+        project = self._project_path_if_valid()
+        if project is None:
+            messagebox.showerror("Pasta inválida", "Selecione uma pasta de projeto válida.")
+            return False
+
+        try:
+            process = abrir_processo_jogo(exe_path, project)
+        except Exception as exc:
+            messagebox.showerror("Erro ao abrir jogo", str(exc))
+            self._set_message(f"Falha ao abrir jogo: {exc}")
+            return False
+
+        self.game_process = process
+        self.game_process_mode = mode
+        self.running_game_exe = exe_path
+        self._refresh_renpy_prepare_ui_state()
+        self._set_message(started_message)
+        self.root.after(800, self._monitor_game_process)
+        return True
+
+    def _refresh_detected_version_after_game(self) -> str:
+        project = self._project_path_if_valid()
+        if project is None:
+            self.detected_renpy_version = None
+            self.renpy_version_var.set("Versão Ren'Py detectada: pasta do projeto inválida")
+            self._set_selected_launcher(None)
+            return "Projeto não encontrado para redetectar versão."
+
+        version = detectar_versao_renpy(project)
+        self.detected_renpy_version = version
+        if version:
+            self.renpy_version_var.set(f"Versão Ren'Py detectada: {version}")
+            self._refresh_launchers(show_status=False)
+            return f"Versão Ren'Py redetectada: {version}."
+
+        self.renpy_version_var.set("Versão Ren'Py detectada: não encontrada")
+        self._set_selected_launcher(None)
+        return "Não foi possível redetectar a versão Ren'Py após fechar o jogo."
+
+    def _monitor_game_process(self) -> None:
+        if self.game_process is None:
+            return
+
+        if processo_ativo(self.game_process):
+            if self.root.winfo_exists():
+                self.root.after(800, self._monitor_game_process)
+            return
+
+        mode = self.game_process_mode
+        process_message = "Jogo fechado. "
+        cleanup_message = ""
+        if mode == "decompile":
+            try:
+                removed = remover_un_files_de_game(self.project_dir_var.get())
+                if removed:
+                    cleanup_message = "Arquivos un.rpy/un.rpyc removidos de game/. "
+                else:
+                    cleanup_message = "Nenhum arquivo un.rpy/un.rpyc precisou ser removido. "
+            except Exception as exc:
+                cleanup_message = f"Falha ao remover un.rpy/un.rpyc: {exc}. "
+
+        self.game_process = None
+        self.game_process_mode = None
+        self.running_game_exe = None
+        self._refresh_renpy_prepare_ui_state()
+
+        version_message = ""
+        if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
+            version_message = self._refresh_detected_version_after_game()
+
+        self._set_message(f"{process_message}{cleanup_message}{version_message}".strip())
+
+    def _run_open_game_prepare(self) -> None:
+        if not self._ensure_renpy_project_ready():
+            return
+        if self._game_running():
+            self._set_message("Já existe um jogo em execução. Feche-o para iniciar outra ação.")
+            return
+
+        exe_path = self._resolve_game_executable()
+        if exe_path is None:
+            self._set_message("Abertura do jogo cancelada.")
+            return
+
+        started_message = (
+            f"Jogo aberto para preparação ({exe_path.name}). Feche manualmente para continuar."
+        )
+        self._start_game_process(exe_path=exe_path, mode="prepare", started_message=started_message)
+
+    def _run_un_rpyc_cycle(self) -> None:
+        if not self._ensure_renpy_project_ready():
+            return
+        if self._game_running():
+            self._set_message("Já existe um jogo em execução. Feche-o para iniciar outra ação.")
+            return
+
+        sources = self._ensure_un_sources()
+        if sources is None:
+            self._set_message("Ciclo un.rpy/un.rpyc cancelado.")
+            return
+
+        exe_path = self._resolve_game_executable()
+        if exe_path is None:
+            self._set_message("Ciclo un.rpy/un.rpyc cancelado (executável não selecionado).")
+            return
+
+        try:
+            copied = copiar_un_files_para_game(self.project_dir_var.get(), sources[0], sources[1])
+        except Exception as exc:
+            messagebox.showerror("Erro ao preparar ciclo un.rpy/un.rpyc", str(exc))
+            self._set_message(f"Falha ao copiar un.rpy/un.rpyc: {exc}")
+            return
+
+        started = self._start_game_process(
+            exe_path=exe_path,
+            mode="decompile",
+            started_message=(
+                f"Arquivos un.rpy/un.rpyc copiados ({len(copied)}). "
+                f"Jogo aberto ({exe_path.name}); feche manualmente para limpeza automática."
+            ),
+        )
+        if started:
+            return
+
+        try:
+            remover_un_files_de_game(self.project_dir_var.get())
+        except Exception:
+            pass
+
+    def _detect_renpy_version(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para redetectar a versão.")
+            return
+        if normalize_engine(self.engine_var.get()) != ENGINE_RENPY:
+            self._set_message("Detecção de versão disponível apenas para projetos Ren'Py.")
+            return
+        if not self._validate_project_dir():
+            return
+
+        version = detectar_versao_renpy(self.project_dir_var.get())
+        self.detected_renpy_version = version
+        if version:
+            self.renpy_version_var.set(f"Versão Ren'Py detectada: {version}")
+            self._refresh_launchers(show_status=False)
+            self._set_message(f"Versão Ren'Py detectada: {version}.")
+            return
+
+        self.renpy_version_var.set("Versão Ren'Py detectada: não encontrada")
+        self._set_selected_launcher(None)
+        self._set_message("Não foi possível detectar a versão Ren'Py automaticamente.")
+
+    def _apply_manual_version(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para ajustar a versão manual.")
+            return
+        raw = self.manual_version_var.get().strip()
+        if not MANUAL_VERSION_RE.match(raw):
+            messagebox.showerror(
+                "Versão inválida",
+                "Informe a versão no formato 8.5 ou 8.5.2.",
+            )
+            return
+
+        self.detected_renpy_version = raw
+        self.renpy_version_var.set(f"Versão Ren'Py detectada: {raw} (manual)")
+        self._refresh_launchers(show_status=False)
+        self._set_message(f"Versão manual aplicada: {raw}.")
+
+    def _refresh_launchers(self, *, show_status: bool = True) -> None:
+        if self._game_running():
+            if show_status:
+                self._set_message("Feche o jogo em execução para reverificar os launchers.")
+            return
+        launchers_root = self.launchers_root_var.get().strip()
+        if not launchers_root:
+            self._set_selected_launcher(None)
+            if show_status:
+                self._set_message("Defina a pasta de versões Ren'Py para buscar launchers.")
+            return
+
+        candidates = listar_launchers(launchers_root)
+        if not candidates:
+            self._set_selected_launcher(None)
+            if show_status:
+                self._set_message("Nenhum launcher válido encontrado na pasta configurada.")
+            return
+
+        selected = selecionar_launcher_compativel(self.detected_renpy_version, candidates)
+        if selected is None:
+            self._set_selected_launcher(None)
+            if show_status:
+                if self.detected_renpy_version:
+                    self._set_message(
+                        f"Não existe launcher compatível para Ren'Py {self.detected_renpy_version}. "
+                        "Use seleção manual ou adicione versão próxima."
+                    )
+                else:
+                    self._set_message("Detecte a versão Ren'Py antes de selecionar launcher automaticamente.")
+            return
+
+        self._set_selected_launcher(selected.exe_path, version_label=selected.version)
+        if show_status:
+            self._set_message(f"Launcher compatível encontrado: {selected.exe_path}.")
+
+    def _pick_launcher_manually(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para selecionar launcher.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecione manualmente o renpy.exe",
+            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+        self._set_selected_launcher(Path(selected), version_label="manual")
+        self._set_message("Launcher Ren'Py selecionado manualmente.")
+
+    def _open_selected_launcher(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para abrir o launcher.")
+            return
+        if not self.selected_launcher_path:
+            messagebox.showerror("Launcher não definido", "Selecione um launcher Ren'Py primeiro.")
+            return
+        if not self.selected_launcher_path.exists():
+            messagebox.showerror("Launcher inválido", f"Arquivo não encontrado: {self.selected_launcher_path}")
+            return
+
+        try:
+            open_in_os(self.selected_launcher_path)
+            self._set_message("Launcher Ren'Py aberto.")
+        except Exception as exc:
+            messagebox.showerror("Erro ao abrir launcher", str(exc))
+
+    def _run_unren(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para rodar o UnRen.")
+            return
+        if normalize_engine(self.engine_var.get()) != ENGINE_RENPY:
+            self._set_message("Execução do UnRen disponível apenas para Ren'Py.")
+            return
+        if not self._validate_project_dir():
+            return
+
+        source_path = Path(self.unren_source_var.get().strip())
+        project_path = Path(self.project_dir_var.get())
+        destination = project_path / "UnRen-forall.bat"
+        destination_was_temp = (
+            self.unren_temp_bat_path is not None
+            and self.unren_temp_bat_path == destination
+            and self.unren_temp_should_remove
+        )
+        destination_exists = destination.exists() and not destination_was_temp
+
+        try:
+            created_path = preparar_descompactador(project_path, source_path, abrir_interativo=True)
+        except Exception as exc:
+            messagebox.showerror("Erro ao executar UnRen", str(exc))
+            self._set_message(f"Falha ao preparar UnRen: {exc}")
+            return
+
+        self.unren_temp_bat_path = created_path
+        self.unren_temp_should_remove = not destination_exists
+        if destination_exists:
+            self._set_message("UnRen aberto. Como já existia BAT na raiz, ele será mantido.")
+        else:
+            self._set_message("UnRen aberto em modo interativo. O BAT temporário será removido ao avançar etapa.")
+
+    def _cleanup_unren_temp_file(self, *, notify: bool) -> None:
+        if not self.unren_temp_bat_path:
+            return
+
+        if not self.unren_temp_should_remove:
+            self.unren_temp_bat_path = None
+            self.unren_temp_should_remove = False
+            return
+
+        removed = False
+        try:
+            removed = remover_descompactador_temporario(self.unren_temp_bat_path)
+        except OSError:
+            removed = False
+
+        if removed and notify:
+            self._set_message("BAT temporário do UnRen removido da raiz do projeto.")
+        elif notify and not removed:
+            self._set_message("Não foi possível remover automaticamente o BAT temporário do UnRen.")
+
+        if removed:
+            self.unren_temp_bat_path = None
+            self.unren_temp_should_remove = False
+
     def _iter_widget_tree(self, root_widget: tk.Misc) -> list[tk.Misc]:
         items: list[tk.Misc] = [root_widget]
         for child in root_widget.winfo_children():
@@ -354,19 +1126,29 @@ class TranslatorWizardApp:
             ws = engine_workspace_dir(self.engine_var.get(), WORKSPACE_ROOT)
             self.workspace_label.configure(text=f"Pasta de trabalho: {ws}")
 
+        self._refresh_renpy_prepare_ui_state()
         self.workspace_info_var.set(f"Pasta de trabalho base: {WORKSPACE_ROOT}")
         self._refresh_drop_targets()
 
     def _on_back(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para continuar.")
+            return
+        if self.current_step == 1:
+            self._cleanup_unren_temp_file(notify=False)
         self._show_step(self.current_step - 1)
 
     def _on_next(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para continuar.")
+            return
         if self.current_step == 0:
             self._show_step(1)
             return
         if self.current_step == 1:
             if not self._validate_project_dir():
                 return
+            self._cleanup_unren_temp_file(notify=True)
             self._show_step(2)
             return
         if self.current_step == 2:
@@ -382,9 +1164,29 @@ class TranslatorWizardApp:
             return
 
     def _on_finish(self) -> None:
+        if self._game_running():
+            messagebox.showwarning(
+                "Jogo em execução",
+                "Feche o jogo aberto na preparação Ren'Py antes de finalizar.",
+            )
+            return
+        self._cleanup_unren_temp_file(notify=False)
+        self.root.destroy()
+
+    def _on_window_close(self) -> None:
+        if self._game_running():
+            messagebox.showwarning(
+                "Jogo em execução",
+                "Feche o jogo aberto na preparação Ren'Py antes de sair.",
+            )
+            return
+        self._cleanup_unren_temp_file(notify=False)
         self.root.destroy()
 
     def _on_engine_change(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de trocar a engine.")
+            return
         engine = normalize_engine(self.engine_var.get())
         self.engine_var.set(engine)
         self._update_engine_display()
@@ -394,16 +1196,25 @@ class TranslatorWizardApp:
         self.open_generated_button.configure(state="disabled")
         self.open_generated_folder_button.configure(state="disabled")
         self.translated_file_var.set("")
+        self.detected_renpy_version = None
+        self.renpy_version_var.set("Versão Ren'Py detectada: -")
+        self.manual_version_var.set("")
+        self._set_selected_launcher(None)
         self._set_message(
             f"Engine atualizada para {self._engine_label()}. Continue para escolher a pasta do projeto."
         )
         self._show_step(self.current_step)
 
     def _pick_project_dir(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de trocar a pasta do projeto.")
+            return
         selected = filedialog.askdirectory(title="Selecione a pasta do projeto")
         if selected:
             self.project_dir_var.set(selected)
             self._set_message(f"Pasta do projeto definida para {self._engine_label()}.")
+            if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
+                self._detect_renpy_version()
 
     def _pick_translated_file(self) -> None:
         selected = filedialog.askopenfilename(
@@ -415,6 +1226,9 @@ class TranslatorWizardApp:
             self._set_message("Arquivo TXT traduzido selecionado.")
 
     def _handle_drop(self, event: tk.Event) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de usar arrastar e soltar.")
+            return
         try:
             items = self.root.tk.splitlist(event.data)
             paths = normalize_dropped_items(list(items))
@@ -428,6 +1242,8 @@ class TranslatorWizardApp:
                     self._set_message("Não foi possível identificar uma pasta válida no item arrastado.")
                     return
                 self.project_dir_var.set(str(selected_dir))
+                if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
+                    self._detect_renpy_version()
                 if used_file_parent:
                     self._set_message("Arquivo detectado no drop. Usei automaticamente a pasta dele.")
                 else:
@@ -550,7 +1366,20 @@ class TranslatorWizardApp:
         if self.last_log_file:
             self.open_log_button.configure(state="normal")
 
+        extra_notes: list[str] = []
+        if normalize_engine(engine) == ENGINE_RENPY:
+            try:
+                destination = aplicar_force_language(
+                    project_dir=self.project_dir_var.get(),
+                    force_language_src=self.force_language_source_var.get(),
+                )
+                extra_notes.append(f"force_language.rpy aplicado em: {destination}")
+            except Exception as exc:
+                result.warnings.append(f"Falha ao aplicar force_language.rpy: {exc}")
+
         details = result.message
+        if extra_notes:
+            details += "\n\n" + "\n".join(extra_notes)
         if result.warnings:
             details += "\n\nAlertas:\n" + "\n".join(f"- {w}" for w in result.warnings)
 

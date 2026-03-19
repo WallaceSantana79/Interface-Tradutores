@@ -14,14 +14,55 @@ TRANSLATIONS_FILENAME = "rpgm_translations.txt"
 PLACEHOLDERS_FILENAME = "rpgm_placeholders.txt"
 MAP_FILENAME = "rpgm_mapa_arquivos.json"
 IMPORT_LOG_FILENAME = "rpgm_import_log.txt"
+RPGM_DIALOGUE_WRAP_LIMIT = 78
 
 
 def expected_workspace_files() -> list[str]:
     return [TRANSLATIONS_FILENAME, PLACEHOLDERS_FILENAME, MAP_FILENAME]
 
 
+def _iter_rpgm_json_files(data_dir: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for path in data_dir.rglob("*.json")
+            if path.is_file() and path.name not in IGNORAR_ARQUIVOS
+        ],
+        key=lambda path: path.relative_to(data_dir).as_posix().lower(),
+    )
+
+
+def resolve_rpgm_data_dir(project_dir: str | Path) -> Path | None:
+    project = Path(project_dir)
+    if not project.exists() or not project.is_dir():
+        return None
+
+    for candidate in [project / "www" / "data", project / "data", project]:
+        if candidate.exists() and candidate.is_dir() and _iter_rpgm_json_files(candidate):
+            return candidate
+
+    return None
+
+
+def describe_rpgm_data_dir(project_dir: str | Path, data_dir: str | Path) -> str:
+    project = Path(project_dir).resolve()
+    data = Path(data_dir).resolve()
+
+    try:
+        relative = data.relative_to(project)
+    except ValueError:
+        return str(data)
+
+    text = relative.as_posix()
+    return text if text != "." else "(pasta selecionada)"
+
+
 def proteger_placeholders(texto: str) -> tuple[str, list[str]]:
-    pattern = r"(\\\\[a-zA-Z]+\[\d+\]|\\[a-zA-Z]+\[\d+\]|\\[><\^.\|!\]]|[<>].*?[<>])"
+    pattern = (
+        r"(\\[A-Za-z_]+(?:\[[^\]]+\])?|"
+        r"\\[\\><\^._\|!\$\{\}\[\]]|"
+        r"[<>].*?[<>])"
+    )
     placeholders: list[str] = []
 
     def repl(match: re.Match[str]) -> str:
@@ -159,8 +200,63 @@ def restaurar_placeholders(text: str, phs: list[str]) -> str:
     return text
 
 
-def reintegrar_json(caminho: Path, traducoes: list[str], ph_map: list[list[str]], log: TextIO) -> None:
-    name = caminho.name
+def _wrap_dialogue_segment(segment: str, limit: int = RPGM_DIALOGUE_WRAP_LIMIT) -> str:
+    if not segment or len(segment) <= limit:
+        return segment
+
+    protected, placeholders = proteger_placeholders(segment)
+    parts = re.split(r"(\s+)", protected)
+
+    lines: list[str] = []
+    current = ""
+
+    for part in parts:
+        if part == "":
+            continue
+
+        candidate = f"{current}{part}" if current else part
+        if current and not part.isspace() and len(candidate) > limit:
+            lines.append(current.rstrip())
+            current = part.lstrip()
+        else:
+            current = candidate
+
+    if current.strip():
+        lines.append(current.rstrip())
+
+    if not lines:
+        return segment
+
+    # Evita a quebra "feia" quando sobra uma palavra muito curta na última linha.
+    if len(lines) >= 2 and len(lines[-1].strip()) <= 10:
+        previous = lines[-2].rstrip()
+        tail = lines[-1].lstrip()
+        if len(f"{previous} {tail}".strip()) <= limit + 12:
+            lines[-2] = f"{previous} {tail}".strip()
+            lines.pop()
+
+    restored_lines = [restaurar_placeholders(line, placeholders) for line in lines]
+    return "\n".join(restored_lines)
+
+
+def wrap_dialogue_text_for_rpgm(text: str, limit: int = RPGM_DIALOGUE_WRAP_LIMIT) -> str:
+    if not text or len(text) <= limit:
+        return text
+
+    chunks = text.split("\n")
+    wrapped_chunks = [_wrap_dialogue_segment(chunk, limit=limit) for chunk in chunks]
+    return "\n".join(wrapped_chunks)
+
+
+def reintegrar_json(
+    caminho: Path,
+    traducoes: list[str],
+    ph_map: list[list[str]],
+    log: TextIO,
+    *,
+    display_name: str | None = None,
+) -> None:
+    name = display_name or caminho.name
     with caminho.open("r", encoding="utf-8") as f:
         try:
             data = json.load(f)
@@ -215,12 +311,14 @@ def reintegrar_json(caminho: Path, traducoes: list[str], ph_map: list[list[str]]
                         continue
 
                     if code in [401, 405]:
-                        cmd["parameters"][0] = injetar(str(params[0]))
+                        cmd["parameters"][0] = wrap_dialogue_text_for_rpgm(injetar(str(params[0])))
                     elif code == 102:
                         for i in range(len(cmd["parameters"][0])):
-                            cmd["parameters"][0][i] = injetar(str(cmd["parameters"][0][i]))
+                            cmd["parameters"][0][i] = wrap_dialogue_text_for_rpgm(
+                                injetar(str(cmd["parameters"][0][i]))
+                            )
                     elif code == 402:
-                        cmd["parameters"][1] = injetar(str(params[1]))
+                        cmd["parameters"][1] = wrap_dialogue_text_for_rpgm(injetar(str(params[1])))
                     elif code in [355, 655]:
                         texto_script = str(params[0])
                         frases_originais = re.findall(r'"([^"]{3,})"', texto_script)
@@ -238,6 +336,28 @@ def reintegrar_json(caminho: Path, traducoes: list[str], ph_map: list[list[str]]
     log.write(f"[OK] {name} processado. ({idx_traducao}/{total_trads} textos injetados)\n")
 
 
+def _resolve_rpgm_mapped_file(data_dir: Path, stored_path: str) -> Path | None:
+    normalized = str(stored_path or "").replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return None
+
+    simple_name = Path(normalized).name
+    candidate = data_dir / Path(normalized)
+    if candidate.exists() and candidate.is_file():
+        return candidate
+
+    if "/" not in normalized and "\\" not in str(stored_path):
+        matches = [
+            path
+            for path in data_dir.rglob(simple_name)
+            if path.is_file() and path.name.lower() == simple_name.lower()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+
+    return None
+
+
 def exportar_rpgm(project_dir: str | Path, workspace_dir: str | Path) -> JobResult:
     project = Path(project_dir)
     workspace = ensure_directory(workspace_dir)
@@ -245,14 +365,14 @@ def exportar_rpgm(project_dir: str | Path, workspace_dir: str | Path) -> JobResu
     if not project.exists():
         return JobResult(success=False, message=f"Pasta não encontrada: {project}")
 
-    arquivos_json = sorted(
-        [
-            p
-            for p in project.glob("*.json")
-            if p.is_file() and p.name not in IGNORAR_ARQUIVOS
-        ],
-        key=lambda p: p.name.lower(),
-    )
+    data_dir = resolve_rpgm_data_dir(project)
+    if data_dir is None:
+        return JobResult(
+            success=False,
+            message="Nenhum arquivo .json de RPGM encontrado em www/data, data ou na pasta selecionada.",
+        )
+
+    arquivos_json = _iter_rpgm_json_files(data_dir)
     if not arquivos_json:
         return JobResult(
             success=False,
@@ -264,8 +384,9 @@ def exportar_rpgm(project_dir: str | Path, workspace_dir: str | Path) -> JobResu
     for caminho in arquivos_json:
         textos, phs_list = extrair_textos_json(caminho)
         if textos:
-            dict_txt[caminho.name] = textos
-            dict_placeh[caminho.name] = phs_list
+            relative_key = caminho.relative_to(data_dir).as_posix()
+            dict_txt[relative_key] = textos
+            dict_placeh[relative_key] = phs_list
 
     mapa_arquivos: dict[str, str] = {}
     translations_path = workspace / TRANSLATIONS_FILENAME
@@ -292,9 +413,10 @@ def exportar_rpgm(project_dir: str | Path, workspace_dir: str | Path) -> JobResu
     with map_path.open("w", encoding="utf-8") as f_map:
         json.dump(mapa_arquivos, f_map, indent=4, ensure_ascii=False)
 
+    data_desc = describe_rpgm_data_dir(project, data_dir)
     return JobResult(
         success=True,
-        message=f"Exportação RPGM concluída ({len(dict_txt)} arquivos).",
+        message=f"Exportação RPGM concluída ({len(dict_txt)} arquivos). Pasta de dados usada: {data_desc}.",
         generated_files=[str(translations_path), str(placeholders_path), str(map_path)],
     )
 
@@ -311,6 +433,13 @@ def importar_rpgm(
     placeholders_path = workspace / PLACEHOLDERS_FILENAME
     map_path = workspace / MAP_FILENAME
     log_path = workspace / IMPORT_LOG_FILENAME
+
+    data_dir = resolve_rpgm_data_dir(project)
+    if data_dir is None:
+        return JobResult(
+            success=False,
+            message="Nenhum arquivo .json de RPGM encontrado em www/data, data ou na pasta selecionada.",
+        )
 
     if not translated_path.exists():
         return JobResult(success=False, message=f"Arquivo traduzido não encontrado: {translated_path}")
@@ -329,21 +458,22 @@ def importar_rpgm(
     targets: list[Path] = []
     for chave_arquivo, arq_original in mapa_arquivos.items():
         if chave_arquivo in t_map:
-            caminho = project / arq_original
-            if caminho.exists():
+            caminho = _resolve_rpgm_mapped_file(data_dir, arq_original)
+            if caminho is not None:
                 targets.append(caminho)
 
     backup_dir: Path | None = None
     if criar_backup and targets:
         backup_dir = create_backup_snapshot("rpgm", project, workspace, targets)
 
+    data_desc = describe_rpgm_data_dir(project, data_dir)
     with log_path.open("w", encoding="utf-8") as log:
         for chave_arquivo, arq_original in mapa_arquivos.items():
             if chave_arquivo not in t_map:
                 continue
 
-            caminho = project / arq_original
-            if caminho.exists():
+            caminho = _resolve_rpgm_mapped_file(data_dir, arq_original)
+            if caminho is not None:
                 phs = p_map.get(chave_arquivo, [])
                 if len(t_map[chave_arquivo]) != len(phs):
                     alerta = (
@@ -351,13 +481,26 @@ def importar_rpgm(
                     )
                     warnings.append(alerta)
                     log.write(f"[ALERTA DE DESVIO] {alerta}\n")
-                reintegrar_json(caminho, t_map[chave_arquivo], phs, log)
+                reintegrar_json(
+                    caminho,
+                    t_map[chave_arquivo],
+                    phs,
+                    log,
+                    display_name=arq_original,
+                )
             else:
-                aviso = f"Arquivo {arq_original} não encontrado na pasta selecionada."
+                if "/" not in str(arq_original) and "\\" not in str(arq_original):
+                    aviso = (
+                        f"Arquivo {arq_original} não encontrado na raiz da pasta de dados RPGM ({data_desc})."
+                    )
+                else:
+                    aviso = (
+                        f"Arquivo {arq_original} não encontrado dentro da pasta de dados RPGM ({data_desc})."
+                    )
                 warnings.append(aviso)
                 log.write(f"[AVISO] {aviso}\n")
 
-    message = "Importação RPGM concluída."
+    message = f"Importação RPGM concluída. Pasta de dados usada: {data_desc}."
     if backup_dir:
         message += f" Backup criado em: {backup_dir}"
 

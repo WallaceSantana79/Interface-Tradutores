@@ -19,8 +19,10 @@ from .rpgm_core import (
     TRANSLATIONS_FILENAME as RPGM_TRANSLATIONS,
     carregar_dados_globais as rpgm_load_translations,
     carregar_placeholders as rpgm_load_placeholders,
+    describe_rpgm_data_dir,
     exportar_rpgm,
     importar_rpgm,
+    resolve_rpgm_data_dir,
 )
 
 ENGINE_RENPY = "renpy"
@@ -59,9 +61,14 @@ def _validate_project_directory(engine: str, project_dir: Path) -> JobResult:
                 "Pasta Ren'Py inválida: game/tl/portuguese não possui arquivos .rpy.",
             )
     elif engine == ENGINE_RPGM:
-        has_files = any(p.is_file() for p in project_dir.glob("*.json"))
-        if not has_files:
-            return JobResult(False, "Pasta RPGM inválida: nenhum arquivo .json encontrado.")
+        data_dir = resolve_rpgm_data_dir(project_dir)
+        if data_dir is None:
+            return JobResult(
+                False,
+                "Pasta RPGM inválida: não encontrei .json em www/data, data ou na pasta selecionada.",
+            )
+        data_desc = describe_rpgm_data_dir(project_dir, data_dir)
+        return JobResult(True, f"Pasta RPGM válida. Pasta de dados: {data_desc}.")
     else:
         return JobResult(False, f"Engine não suportada: {engine}")
 

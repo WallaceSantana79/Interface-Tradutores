@@ -18,6 +18,7 @@ from translator_core.orchestrator import (
     normalize_engine,
     translation_filename_for_engine,
 )
+from translator_core.rpgm_core import describe_rpgm_data_dir, resolve_rpgm_data_dir
 from translator_core.renpy_prepare import (
     aplicar_force_language,
     abrir_processo_jogo,
@@ -1212,7 +1213,7 @@ class TranslatorWizardApp:
         selected = filedialog.askdirectory(title="Selecione a pasta do projeto")
         if selected:
             self.project_dir_var.set(selected)
-            self._set_message(f"Pasta do projeto definida para {self._engine_label()}.")
+            self._set_project_resolution_message()
             if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
                 self._detect_renpy_version()
 
@@ -1244,10 +1245,8 @@ class TranslatorWizardApp:
                 self.project_dir_var.set(str(selected_dir))
                 if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
                     self._detect_renpy_version()
-                if used_file_parent:
-                    self._set_message("Arquivo detectado no drop. Usei automaticamente a pasta dele.")
                 else:
-                    self._set_message("Pasta recebida por arrastar e soltar.")
+                    self._set_project_resolution_message(via_drop=True, used_file_parent=used_file_parent)
                 return
 
             if self.drop_mode == DROP_TRANSLATED_TXT:
@@ -1280,6 +1279,35 @@ class TranslatorWizardApp:
     def _set_message(self, text: str) -> None:
         self.message_var.set(text)
 
+    def _set_project_resolution_message(
+        self,
+        *,
+        via_drop: bool = False,
+        used_file_parent: bool = False,
+    ) -> None:
+        engine = normalize_engine(self.engine_var.get())
+        if engine == ENGINE_RENPY:
+            if via_drop and used_file_parent:
+                self._set_message("Arquivo detectado no drop. Usei automaticamente a pasta dele.")
+            elif via_drop:
+                self._set_message("Pasta recebida por arrastar e soltar.")
+            else:
+                self._set_message(f"Pasta do projeto definida para {self._engine_label()}.")
+            return
+
+        project = Path(self.project_dir_var.get())
+        data_dir = resolve_rpgm_data_dir(project)
+        prefix = "Arquivo detectado no drop. Usei automaticamente a pasta dele." if via_drop and used_file_parent else (
+            "Pasta recebida por arrastar e soltar." if via_drop else "Pasta do projeto definida para RPGM."
+        )
+
+        if data_dir is None:
+            self._set_message(f"{prefix} Ainda não foi possível resolver a pasta de dados RPGM.")
+            return
+
+        data_desc = describe_rpgm_data_dir(project, data_dir)
+        self._set_message(f"{prefix} Pasta de dados RPGM resolvida: {data_desc}.")
+
     def _run_export(self) -> None:
         if not self._validate_project_dir():
             return
@@ -1304,7 +1332,7 @@ class TranslatorWizardApp:
         if result.warnings:
             details += "\n\n" + "\n".join(f"- {w}" for w in result.warnings)
         messagebox.showinfo("Exportação concluída", details)
-        self._set_message(f"Exportação {self._engine_label()} concluída. Agora traduza e selecione o TXT final.")
+        self._set_message(f"{result.message} Agora traduza e selecione o TXT final.")
 
     def _open_generated_txt(self) -> None:
         if not self.generated_translation_path:
@@ -1384,7 +1412,7 @@ class TranslatorWizardApp:
             details += "\n\nAlertas:\n" + "\n".join(f"- {w}" for w in result.warnings)
 
         messagebox.showinfo("Importação concluída", details)
-        self._set_message(f"Importação {self._engine_label()} finalizada com sucesso.")
+        self._set_message(result.message)
 
     def _open_log(self) -> None:
         if not self.last_log_file:

@@ -9,6 +9,7 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 from translator_core import exportar, importar, pre_validar_importacao
 from translator_core.orchestrator import (
@@ -44,7 +45,7 @@ except ImportError:
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "v1.3"
+APP_VERSION = "v1.4"
 APP_DEFAULT_GEOMETRY = "780x560"
 APP_BASE_MIN_SIZE = (700, 500)
 APP_RENPY_STEP2_MIN_SIZE = (760, 680)
@@ -141,17 +142,22 @@ def resolve_translated_txt_drop_path(paths: list[Path]) -> Path | None:
     return None
 
 
-def _default_settings() -> dict[str, str]:
+def _project_settings_key(project_dir: str | Path) -> str:
+    return os.path.normcase(os.path.normpath(str(Path(project_dir).resolve())))
+
+
+def _default_settings() -> dict[str, Any]:
     return {
         "launchers_root": "",
         "unren_source_path": DEFAULT_UNREN_SOURCE,
         "force_language_path": DEFAULT_FORCE_LANGUAGE,
         "un_rpy_source_path": DEFAULT_UN_RPY_SOURCE,
         "un_rpyc_source_path": DEFAULT_UN_RPYC_SOURCE,
+        "game_exe_by_project": {},
     }
 
 
-def load_app_settings() -> dict[str, str]:
+def load_app_settings() -> dict[str, Any]:
     settings = _default_settings()
     if not SETTINGS_PATH.exists() or not SETTINGS_PATH.is_file():
         return settings
@@ -161,15 +167,23 @@ def load_app_settings() -> dict[str, str]:
     except (OSError, json.JSONDecodeError):
         return settings
 
-    for key in settings:
+    for key in ["launchers_root", "unren_source_path", "force_language_path", "un_rpy_source_path", "un_rpyc_source_path"]:
         value = loaded.get(key)
         if isinstance(value, str):
             settings[key] = value
 
+    saved_exe_map = loaded.get("game_exe_by_project")
+    if isinstance(saved_exe_map, dict):
+        normalized: dict[str, str] = {}
+        for raw_project, raw_exe in saved_exe_map.items():
+            if isinstance(raw_project, str) and isinstance(raw_exe, str):
+                normalized[raw_project] = raw_exe
+        settings["game_exe_by_project"] = normalized
+
     return settings
 
 
-def save_app_settings(settings: dict[str, str]) -> None:
+def save_app_settings(settings: dict[str, Any]) -> None:
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(
         json.dumps(settings, ensure_ascii=False, indent=2),
@@ -208,6 +222,7 @@ class TranslatorWizardApp:
         self.force_language_info_var = tk.StringVar(value="")
         self.un_rpy_info_var = tk.StringVar(value="")
         self.un_rpyc_info_var = tk.StringVar(value="")
+        self.game_exe_info_var = tk.StringVar(value="Executável do jogo: (defina a pasta do projeto)")
         self.status_var = tk.StringVar(value="Etapa 1/5 - Escolha a engine")
         self.message_var = tk.StringVar(value="Escolha a engine para iniciar.")
         self.workspace_info_var = tk.StringVar(value=f"Pasta de trabalho base: {WORKSPACE_ROOT}")
@@ -229,6 +244,7 @@ class TranslatorWizardApp:
         self._build_layout()
         self._refresh_renpy_settings_labels()
         self._update_engine_display()
+        self._refresh_game_exe_info()
         self._show_step(0)
 
     def _configure_style(self) -> None:
@@ -531,6 +547,30 @@ class TranslatorWizardApp:
         self.open_log_button = ttk.Button(frame, text="Abrir log da importação", command=self._open_log)
         self.open_log_button.pack(anchor="w", pady=(10, 0))
         self.open_log_button.configure(state="disabled")
+
+        ttk.Separator(frame).pack(fill="x", pady=(14, 10))
+        ttk.Label(frame, textvariable=self.game_exe_info_var, style="Hint.TLabel").pack(anchor="w")
+        self.pick_game_exe_button = ttk.Button(
+            frame,
+            text="Definir executável do jogo",
+            command=self._pick_and_save_game_exe,
+        )
+        self.pick_game_exe_button.pack(anchor="w", pady=(8, 0))
+
+        finish_row = ttk.Frame(frame)
+        finish_row.pack(fill="x", pady=(14, 0))
+        self.finish_open_button = ttk.Button(
+            finish_row,
+            text="Finalizar e abrir",
+            command=self._on_finish_and_open,
+        )
+        self.finish_open_button.pack(side="left", padx=(0, 8))
+        self.finish_restart_button = ttk.Button(
+            finish_row,
+            text="Finalizar e voltar ao início",
+            command=self._on_finish_and_restart,
+        )
+        self.finish_restart_button.pack(side="left")
         return frame
 
     def _engine_label(self) -> str:
@@ -551,14 +591,63 @@ class TranslatorWizardApp:
         self.un_rpy_info_var.set(f"Fonte un.rpy: {un_rpy_source}")
         self.un_rpyc_info_var.set(f"Fonte un.rpyc: {un_rpyc_source}")
 
+    def _get_game_exe_map(self) -> dict[str, str]:
+        raw = self.settings.get("game_exe_by_project")
+        if not isinstance(raw, dict):
+            raw = {}
+            self.settings["game_exe_by_project"] = raw
+        normalized: dict[str, str] = {}
+        for project_key, exe_path in raw.items():
+            if isinstance(project_key, str) and isinstance(exe_path, str):
+                normalized[project_key] = exe_path
+        self.settings["game_exe_by_project"] = normalized
+        return normalized
+
+    def _get_saved_game_exe_for_project(self, project: Path) -> Path | None:
+        project_key = _project_settings_key(project)
+        raw = self._get_game_exe_map().get(project_key)
+        if not raw:
+            return None
+        return Path(raw)
+
+    def _save_game_exe_for_project(self, project: Path, exe_path: Path) -> None:
+        project_key = _project_settings_key(project)
+        self._get_game_exe_map()[project_key] = str(exe_path)
+        self._save_settings()
+
+    def _refresh_game_exe_info(self) -> None:
+        project = self._project_path_if_valid()
+        if project is None:
+            self.game_exe_info_var.set("Executável do jogo: (defina a pasta do projeto)")
+            return
+
+        saved = self._get_saved_game_exe_for_project(project)
+        if saved and saved.exists() and saved.is_file():
+            self.game_exe_info_var.set(f"Executável salvo: {saved}")
+            return
+        if saved:
+            self.game_exe_info_var.set(
+                f"Executável salvo não encontrado: {saved} (será necessário redefinir)"
+            )
+            return
+
+        detected = detectar_executavel_jogo(project)
+        if detected and detected.exists() and detected.is_file():
+            self.game_exe_info_var.set(f"Executável detectável: {detected} (ainda não salvo)")
+            return
+
+        self.game_exe_info_var.set("Executável do jogo: não detectado (defina manualmente)")
+
     def _save_settings(self) -> None:
         self.settings["launchers_root"] = self.launchers_root_var.get().strip()
         self.settings["unren_source_path"] = self.unren_source_var.get().strip()
         self.settings["force_language_path"] = self.force_language_source_var.get().strip()
         self.settings["un_rpy_source_path"] = self.un_rpy_source_var.get().strip()
         self.settings["un_rpyc_source_path"] = self.un_rpyc_source_var.get().strip()
+        self.settings["game_exe_by_project"] = self._get_game_exe_map()
         save_app_settings(self.settings)
         self._refresh_renpy_settings_labels()
+        self._refresh_game_exe_info()
 
     def _refresh_renpy_prepare_ui_state(self) -> None:
         is_renpy = normalize_engine(self.engine_var.get()) == ENGINE_RENPY
@@ -575,6 +664,12 @@ class TranslatorWizardApp:
             button.configure(state="normal" if (is_renpy and not game_busy) else "disabled")
         self.project_dir_entry.configure(state="normal" if not game_busy else "disabled")
         self.pick_project_dir_button.configure(state="normal" if not game_busy else "disabled")
+        if hasattr(self, "pick_game_exe_button"):
+            self.pick_game_exe_button.configure(state="normal" if not game_busy else "disabled")
+        if hasattr(self, "finish_open_button"):
+            self.finish_open_button.configure(state="normal" if not game_busy else "disabled")
+        if hasattr(self, "finish_restart_button"):
+            self.finish_restart_button.configure(state="normal" if not game_busy else "disabled")
         self.back_button.configure(state="disabled" if game_busy else ("normal" if self.current_step > 0 else "disabled"))
         self.next_button.configure(state="disabled" if game_busy else "normal")
 
@@ -708,7 +803,10 @@ class TranslatorWizardApp:
         self._set_message("Fonte un.rpyc atualizada.")
 
     def _project_path_if_valid(self) -> Path | None:
-        project = Path(self.project_dir_var.get())
+        raw = self.project_dir_var.get().strip()
+        if not raw:
+            return None
+        project = Path(raw)
         if not project.exists() or not project.is_dir():
             return None
         return project
@@ -719,17 +817,40 @@ class TranslatorWizardApp:
             return False
         return self._validate_project_dir()
 
-    def _resolve_game_executable(self) -> Path | None:
+    def _resolve_game_executable(
+        self,
+        *,
+        prefer_saved: bool = True,
+        allow_manual: bool = True,
+        remember_selection: bool = True,
+        prompt_title: str = "Selecione o executável principal do jogo",
+    ) -> Path | None:
         project = self._project_path_if_valid()
         if project is None:
             return None
 
+        if prefer_saved:
+            saved = self._get_saved_game_exe_for_project(project)
+            if saved and saved.exists() and saved.is_file():
+                self._refresh_game_exe_info()
+                self._set_message(f"Executável resolvido pelo cadastro salvo deste projeto: {saved}")
+                return saved
+
         auto_detected = detectar_executavel_jogo(project)
-        if auto_detected and auto_detected.exists():
+        if auto_detected and auto_detected.exists() and auto_detected.is_file():
+            if remember_selection:
+                self._save_game_exe_for_project(project, auto_detected)
+            else:
+                self._refresh_game_exe_info()
+            self._set_message(f"Executável resolvido automaticamente: {auto_detected}")
             return auto_detected
 
+        if not allow_manual:
+            self._refresh_game_exe_info()
+            return None
+
         selected = filedialog.askopenfilename(
-            title="Selecione o executável principal do jogo",
+            title=prompt_title,
             initialdir=str(project),
             filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
         )
@@ -743,6 +864,12 @@ class TranslatorWizardApp:
         if not exe_path.exists() or not exe_path.is_file():
             messagebox.showerror("Executável inválido", f"Arquivo não encontrado: {exe_path}")
             return None
+
+        if remember_selection:
+            self._save_game_exe_for_project(project, exe_path)
+        else:
+            self._refresh_game_exe_info()
+        self._set_message(f"Executável definido manualmente: {exe_path}")
         return exe_path
 
     def _ensure_un_sources(self) -> tuple[Path, Path] | None:
@@ -774,6 +901,33 @@ class TranslatorWizardApp:
             self._save_settings()
 
         return (un_rpy, un_rpyc)
+
+    def _pick_and_save_game_exe(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para definir o executável.")
+            return
+        if not self._validate_project_dir():
+            return
+
+        project = self._project_path_if_valid()
+        if project is None:
+            return
+
+        selected = filedialog.askopenfilename(
+            title="Selecione o executável principal do jogo",
+            initialdir=str(project),
+            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
+        )
+        if not selected:
+            return
+
+        exe_path = Path(selected)
+        if exe_path.suffix.lower() != ".exe" or not exe_path.exists() or not exe_path.is_file():
+            messagebox.showerror("Executável inválido", "Selecione um arquivo .exe válido.")
+            return
+
+        self._save_game_exe_for_project(project, exe_path)
+        self._set_message(f"Executável salvo para este projeto: {exe_path}")
 
     def _game_running(self) -> bool:
         return processo_ativo(self.game_process)
@@ -1129,6 +1283,7 @@ class TranslatorWizardApp:
 
         self._refresh_renpy_prepare_ui_state()
         self.workspace_info_var.set(f"Pasta de trabalho base: {WORKSPACE_ROOT}")
+        self._refresh_game_exe_info()
         self._refresh_drop_targets()
 
     def _on_back(self) -> None:
@@ -1174,6 +1329,70 @@ class TranslatorWizardApp:
         self._cleanup_unren_temp_file(notify=False)
         self.root.destroy()
 
+    def _reset_wizard_to_start(self) -> None:
+        self._cleanup_unren_temp_file(notify=False)
+        self.engine_var.set(ENGINE_RENPY)
+        self._update_engine_display()
+        self.project_dir_var.set("")
+        self.translated_file_var.set("")
+        self.export_done = False
+        self.last_log_file = None
+        self.generated_translation_path = None
+        self.generated_txt_label.configure(text="-")
+        self.open_generated_button.configure(state="disabled")
+        self.open_generated_folder_button.configure(state="disabled")
+        self.open_log_button.configure(state="disabled")
+        self.detected_renpy_version = None
+        self.renpy_version_var.set("Versão Ren'Py detectada: -")
+        self.manual_version_var.set("")
+        self._set_selected_launcher(None)
+        self._refresh_game_exe_info()
+        self._show_step(0)
+        self._set_message("Fluxo finalizado. Escolha a engine para iniciar um novo projeto.")
+
+    def _on_finish_and_open(self) -> None:
+        if self._game_running():
+            messagebox.showwarning(
+                "Jogo em execução",
+                "Feche o jogo aberto na preparação Ren'Py antes de finalizar.",
+            )
+            return
+        if not self._validate_project_dir():
+            return
+
+        exe_path = self._resolve_game_executable(
+            prefer_saved=True,
+            allow_manual=True,
+            remember_selection=True,
+            prompt_title="Selecione o executável para abrir após finalizar",
+        )
+        if exe_path is None:
+            self._set_message("Finalização com abertura cancelada (executável não definido).")
+            return
+
+        project = self._project_path_if_valid()
+        if project is None:
+            return
+
+        try:
+            abrir_processo_jogo(exe_path, project)
+        except Exception as exc:
+            messagebox.showerror("Erro ao abrir jogo", str(exc))
+            self._set_message(f"Falha ao abrir jogo na finalização: {exc}")
+            return
+
+        self._cleanup_unren_temp_file(notify=False)
+        self.root.destroy()
+
+    def _on_finish_and_restart(self) -> None:
+        if self._game_running():
+            messagebox.showwarning(
+                "Jogo em execução",
+                "Feche o jogo aberto na preparação Ren'Py antes de finalizar.",
+            )
+            return
+        self._reset_wizard_to_start()
+
     def _on_window_close(self) -> None:
         if self._game_running():
             messagebox.showwarning(
@@ -1201,6 +1420,7 @@ class TranslatorWizardApp:
         self.renpy_version_var.set("Versão Ren'Py detectada: -")
         self.manual_version_var.set("")
         self._set_selected_launcher(None)
+        self._refresh_game_exe_info()
         self._set_message(
             f"Engine atualizada para {self._engine_label()}. Continue para escolher a pasta do projeto."
         )
@@ -1213,6 +1433,7 @@ class TranslatorWizardApp:
         selected = filedialog.askdirectory(title="Selecione a pasta do projeto")
         if selected:
             self.project_dir_var.set(selected)
+            self._refresh_game_exe_info()
             self._set_project_resolution_message()
             if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
                 self._detect_renpy_version()
@@ -1243,6 +1464,7 @@ class TranslatorWizardApp:
                     self._set_message("Não foi possível identificar uma pasta válida no item arrastado.")
                     return
                 self.project_dir_var.set(str(selected_dir))
+                self._refresh_game_exe_info()
                 if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
                     self._detect_renpy_version()
                 else:
@@ -1263,7 +1485,11 @@ class TranslatorWizardApp:
             self._set_message(f"Falha no arrastar e soltar: {exc}")
 
     def _validate_project_dir(self) -> bool:
-        project_dir = Path(self.project_dir_var.get())
+        raw = self.project_dir_var.get().strip()
+        if not raw:
+            messagebox.showerror("Pasta inválida", "Selecione uma pasta de projeto válida.")
+            return False
+        project_dir = Path(raw)
         if not project_dir.exists() or not project_dir.is_dir():
             messagebox.showerror("Pasta inválida", "Selecione uma pasta de projeto válida.")
             return False
@@ -1278,6 +1504,150 @@ class TranslatorWizardApp:
 
     def _set_message(self, text: str) -> None:
         self.message_var.set(text)
+
+    def _confirm_import_with_warnings(self, warnings: list[str]) -> bool:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Alertas na pré-validação")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.minsize(560, 320)
+
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        width = min(900, max(640, screen_w - 140))
+        height = min(560, max(360, screen_h - 180))
+        x = max((screen_w - width) // 2, 0)
+        y = max((screen_h - height) // 2, 0)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        container = ttk.Frame(dialog, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text=(
+                "Foram encontrados alertas na pré-validação.\n"
+                "Revise a lista abaixo e escolha se deseja continuar a importação."
+            ),
+            justify="left",
+        ).pack(anchor="w")
+
+        text_wrap = ttk.Frame(container)
+        text_wrap.pack(fill="both", expand=True, pady=(10, 10))
+
+        scrollbar = ttk.Scrollbar(text_wrap, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        warning_box = tk.Text(
+            text_wrap,
+            wrap="word",
+            yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 10),
+            relief="solid",
+            borderwidth=1,
+        )
+        warning_box.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=warning_box.yview)
+
+        for warning in warnings:
+            warning_box.insert("end", f"- {warning}\n")
+        warning_box.configure(state="disabled")
+
+        result = {"continue": False}
+
+        def on_continue() -> None:
+            result["continue"] = True
+            dialog.destroy()
+
+        def on_cancel() -> None:
+            result["continue"] = False
+            dialog.destroy()
+
+        buttons = ttk.Frame(container)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Cancelar", command=on_cancel).pack(side="right")
+        ttk.Button(buttons, text="Continuar importação", command=on_continue).pack(
+            side="right", padx=(0, 8)
+        )
+
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        dialog.bind("<Escape>", lambda _e: on_cancel())
+        dialog.bind("<Return>", lambda _e: on_continue())
+        warning_box.focus_set()
+        self.root.wait_window(dialog)
+        return result["continue"]
+
+    def _show_import_result_dialog(
+        self,
+        *,
+        message: str,
+        extra_notes: list[str],
+        warnings: list[str],
+    ) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Importação concluída")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.minsize(560, 320)
+
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        width = min(920, max(660, screen_w - 120))
+        height = min(580, max(380, screen_h - 160))
+        x = max((screen_w - width) // 2, 0)
+        y = max((screen_h - height) // 2, 0)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        container = ttk.Frame(dialog, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Resumo da importação",
+            style="Status.TLabel",
+        ).pack(anchor="w")
+
+        text_wrap = ttk.Frame(container)
+        text_wrap.pack(fill="both", expand=True, pady=(10, 10))
+
+        scrollbar = ttk.Scrollbar(text_wrap, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        result_box = tk.Text(
+            text_wrap,
+            wrap="word",
+            yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 10),
+            relief="solid",
+            borderwidth=1,
+        )
+        result_box.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=result_box.yview)
+
+        result_box.insert("end", message + "\n")
+        if extra_notes:
+            result_box.insert("end", "\nNotas adicionais:\n")
+            for note in extra_notes:
+                result_box.insert("end", f"- {note}\n")
+        if warnings:
+            result_box.insert("end", "\nAlertas:\n")
+            for warning in warnings:
+                result_box.insert("end", f"- {warning}\n")
+        result_box.configure(state="disabled")
+
+        def on_close() -> None:
+            dialog.destroy()
+
+        buttons = ttk.Frame(container)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Fechar", command=on_close).pack(side="right")
+        if self.last_log_file:
+            ttk.Button(buttons, text="Abrir log", command=self._open_log).pack(side="right", padx=(0, 8))
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+        dialog.bind("<Escape>", lambda _e: on_close())
+        result_box.focus_set()
+        self.root.wait_window(dialog)
 
     def _set_project_resolution_message(
         self,
@@ -1367,9 +1737,7 @@ class TranslatorWizardApp:
             return
 
         if pre.warnings:
-            warn_msg = "Foram encontrados alertas:\n\n" + "\n".join(f"- {w}" for w in pre.warnings)
-            warn_msg += "\n\nDeseja continuar mesmo assim?"
-            if not messagebox.askyesno("Alertas na pré-validação", warn_msg):
+            if not self._confirm_import_with_warnings(pre.warnings):
                 self._set_message("Importação cancelada para revisão dos alertas.")
                 return
 
@@ -1405,13 +1773,11 @@ class TranslatorWizardApp:
             except Exception as exc:
                 result.warnings.append(f"Falha ao aplicar force_language.rpy: {exc}")
 
-        details = result.message
-        if extra_notes:
-            details += "\n\n" + "\n".join(extra_notes)
-        if result.warnings:
-            details += "\n\nAlertas:\n" + "\n".join(f"- {w}" for w in result.warnings)
-
-        messagebox.showinfo("Importação concluída", details)
+        self._show_import_result_dialog(
+            message=result.message,
+            extra_notes=extra_notes,
+            warnings=result.warnings,
+        )
         self._set_message(result.message)
 
     def _open_log(self) -> None:

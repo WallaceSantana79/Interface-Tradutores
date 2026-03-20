@@ -1,6 +1,6 @@
 # Interface Tradutores (V1)
 
-Aplicação desktop em Python para simplificar o fluxo de exportação/importação de textos de jogos Ren'Py e RPGM.
+Aplicação desktop em Python para simplificar o fluxo de exportação/importação de textos de jogos Ren'Py, RPGM e Unity.
 
 ## Como executar
 
@@ -8,12 +8,12 @@ Aplicação desktop em Python para simplificar o fluxo de exportação/importaç
 python app.py
 ```
 
-## Dependência opcional (arrastar e soltar)
+## Dependências opcionais / runtime (modo Python)
 
-Para habilitar drag-and-drop da pasta na interface:
+Para habilitar drag-and-drop e leitura de bundles Unity:
 
 ```bash
-pip install tkinterdnd2
+pip install tkinterdnd2 UnityPy
 ```
 
 Sem essa dependência, o app continua funcionando normalmente pelo botão de seleção.
@@ -44,12 +44,42 @@ Para executar o app distribuído, rode o `InterfaceTradutores.exe` dentro da pas
 
 ## Fluxo no app
 
-1. Escolher engine (`Ren'Py` ou `RPGM`)
+1. Escolher engine (`Ren'Py`, `RPGM` ou `Unity`)
 2. Selecionar pasta do projeto (com suporte a arrastar e soltar)
 3. (Ren'Py) opcional: detectar versão, executar UnRen e abrir launcher compatível
 4. Executar exportação
 5. Traduzir externamente e selecionar o TXT final
 6. Executar importação (com pergunta de backup)
+
+## Suporte Unity (V1 offline)
+
+No Unity, o app trabalha em modo offline (sem API/runtime):
+
+- A entrada esperada é a raiz do jogo.
+- O app resolve automaticamente a pasta `*_Data`.
+- Exporta/importa apenas arquivos textuais suportados: `.json`, `.csv`, `.tsv`, `.txt`, `.xml`, `.yml`, `.yaml`.
+- Ignora arquivos binários e técnicos (ex.: `.assets`, `.bundle`, `.dll`, `.exe`, `.meta`, `.manifest`).
+
+Artefatos no workspace da engine Unity:
+
+- `unity_translations.txt`
+- `unity_placeholders.txt`
+- `unity_mapa_arquivos.json`
+- `unity_import_log.txt`
+
+Limitações desta fase:
+
+- Não altera conteúdos binários Unity (`.assets`, bundles, IL2CPP dump etc.).
+- Overlay Unity ficou fora do escopo neste V1.
+
+## Unity V1.1 (tables de idioma)
+
+No Unity com Addressables (`StreamingAssets/aa`), o app pode detectar bundles de table de idioma.
+
+- Na etapa 2 (Unity), use **Detectar tables de idioma**.
+- Se houver múltiplas tables, selecione a desejada e clique em **Usar seleção para export/import**.
+- A seleção vale para o projeto atual (sessão/configuração).
+- Se nenhuma table for selecionada, o export/import Unity usa apenas arquivos textuais comuns.
 
 ## Preparação Ren'Py (V1.2)
 

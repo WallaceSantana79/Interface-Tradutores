@@ -15,6 +15,7 @@ from translator_core import exportar, importar, pre_validar_importacao
 from translator_core.orchestrator import (
     ENGINE_RENPY,
     ENGINE_RPGM,
+    ENGINE_UNITY,
     engine_workspace_dir,
     normalize_engine,
     translation_filename_for_engine,
@@ -33,6 +34,14 @@ from translator_core.renpy_prepare import (
     remover_descompactador_temporario,
     selecionar_launcher_compativel,
 )
+from translator_core.unity_core import (
+    clear_unity_selected_table_for_project,
+    describe_unity_data_dir,
+    detectar_tabelas_idioma_unity,
+    get_unity_selected_table_for_project,
+    resolve_unity_data_dir,
+    set_unity_selected_table_for_project,
+)
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -45,10 +54,12 @@ except ImportError:
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "v1.4"
+APP_VERSION = "v1.11"
 APP_DEFAULT_GEOMETRY = "780x560"
 APP_BASE_MIN_SIZE = (700, 500)
 APP_RENPY_STEP2_MIN_SIZE = (760, 680)
+APP_STEP2_MIN_SIZE = (760, 620)
+APP_AUTO_FIT_SCREEN_MARGIN = 80
 
 DROP_DISABLED = "disabled"
 DROP_PROJECT_DIR = "project_dir"
@@ -154,6 +165,7 @@ def _default_settings() -> dict[str, Any]:
         "un_rpy_source_path": DEFAULT_UN_RPY_SOURCE,
         "un_rpyc_source_path": DEFAULT_UN_RPYC_SOURCE,
         "game_exe_by_project": {},
+        "unity_table_selection_by_project": {},
     }
 
 
@@ -172,13 +184,15 @@ def load_app_settings() -> dict[str, Any]:
         if isinstance(value, str):
             settings[key] = value
 
-    saved_exe_map = loaded.get("game_exe_by_project")
-    if isinstance(saved_exe_map, dict):
+    for map_key in ["game_exe_by_project", "unity_table_selection_by_project"]:
+        saved_map = loaded.get(map_key)
+        if not isinstance(saved_map, dict):
+            continue
         normalized: dict[str, str] = {}
-        for raw_project, raw_exe in saved_exe_map.items():
+        for raw_project, raw_exe in saved_map.items():
             if isinstance(raw_project, str) and isinstance(raw_exe, str):
                 normalized[raw_project] = raw_exe
-        settings["game_exe_by_project"] = normalized
+        settings[map_key] = normalized
 
     return settings
 
@@ -223,6 +237,8 @@ class TranslatorWizardApp:
         self.un_rpy_info_var = tk.StringVar(value="")
         self.un_rpyc_info_var = tk.StringVar(value="")
         self.game_exe_info_var = tk.StringVar(value="Executável do jogo: (defina a pasta do projeto)")
+        self.unity_tables_info_var = tk.StringVar(value="Tables Unity: detectar para escolher o idioma/table.")
+        self.unity_selected_table_var = tk.StringVar(value="Table selecionada: (nenhuma)")
         self.status_var = tk.StringVar(value="Etapa 1/5 - Escolha a engine")
         self.message_var = tk.StringVar(value="Escolha a engine para iniciar.")
         self.workspace_info_var = tk.StringVar(value=f"Pasta de trabalho base: {WORKSPACE_ROOT}")
@@ -240,6 +256,7 @@ class TranslatorWizardApp:
         self.game_process: subprocess.Popen[bytes] | None = None
         self.game_process_mode: str | None = None
         self.running_game_exe: Path | None = None
+        self.unity_table_candidates: list[tuple[str, str]] = []
 
         self._build_layout()
         self._refresh_renpy_settings_labels()
@@ -261,7 +278,7 @@ class TranslatorWizardApp:
         self.container = ttk.Frame(self.root, padding=14)
         self.container.pack(fill="both", expand=True)
 
-        ttk.Label(self.container, text="Assistente de Tradução Ren'Py/RPGM", style="Title.TLabel").pack(
+        ttk.Label(self.container, text="Assistente de Tradução Ren'Py/RPGM/Unity", style="Title.TLabel").pack(
             anchor="w"
         )
         ttk.Label(self.container, textvariable=self.engine_display_var, style="Engine.TLabel").pack(
@@ -318,6 +335,13 @@ class TranslatorWizardApp:
             frame,
             text="RPGM",
             value=ENGINE_RPGM,
+            variable=self.engine_var,
+            command=self._on_engine_change,
+        ).pack(anchor="w", pady=4)
+        ttk.Radiobutton(
+            frame,
+            text="Unity",
+            value=ENGINE_UNITY,
             variable=self.engine_var,
             command=self._on_engine_change,
         ).pack(anchor="w", pady=4)
@@ -491,6 +515,58 @@ class TranslatorWizardApp:
             self.pick_un_rpy_button,
             self.pick_un_rpyc_button,
         ]
+
+        self.unity_prepare_frame = ttk.LabelFrame(frame, text="Preparação Unity (localização)")
+        self.unity_prepare_frame.pack(fill="x", pady=(12, 0))
+        self.unity_prepare_visible = True
+
+        ttk.Label(self.unity_prepare_frame, textvariable=self.unity_tables_info_var).pack(
+            anchor="w", padx=8, pady=(6, 2)
+        )
+        ttk.Label(self.unity_prepare_frame, textvariable=self.unity_selected_table_var).pack(
+            anchor="w", padx=8, pady=(0, 6)
+        )
+
+        self.unity_table_listbox = tk.Listbox(self.unity_prepare_frame, height=6, exportselection=False)
+        self.unity_table_listbox.pack(fill="x", padx=8, pady=(0, 8))
+        self.unity_table_listbox.bind("<<ListboxSelect>>", self._on_unity_table_highlighted)
+
+        unity_btn_row = ttk.Frame(self.unity_prepare_frame)
+        unity_btn_row.pack(fill="x", padx=8, pady=(0, 8))
+        self.detect_unity_tables_button = ttk.Button(
+            unity_btn_row,
+            text="Detectar tables de idioma",
+            command=self._detect_unity_tables,
+        )
+        self.detect_unity_tables_button.pack(side="left", padx=(0, 8))
+        self.apply_unity_table_button = ttk.Button(
+            unity_btn_row,
+            text="Usar seleção para export/import",
+            command=self._apply_unity_table_selection,
+        )
+        self.apply_unity_table_button.pack(side="left")
+        self.clear_unity_table_button = ttk.Button(
+            unity_btn_row,
+            text="Limpar seleção",
+            command=self._clear_unity_table_selection,
+        )
+        self.clear_unity_table_button.pack(side="left", padx=(8, 0))
+
+        self.unity_prepare_hint = ttk.Label(
+            self.unity_prepare_frame,
+            text=(
+                "Se houver várias tables de idioma, selecione a desejada. "
+                "Se não detectar tables, o app exporta somente arquivos textuais comuns."
+            ),
+            style="Hint.TLabel",
+        )
+        self.unity_prepare_hint.pack(anchor="w", padx=8, pady=(0, 8))
+
+        self.unity_prepare_buttons = [
+            self.detect_unity_tables_button,
+            self.apply_unity_table_button,
+            self.clear_unity_table_button,
+        ]
         return frame
 
     def _build_step_export(self, parent: ttk.Frame) -> ttk.Frame:
@@ -574,7 +650,14 @@ class TranslatorWizardApp:
         return frame
 
     def _engine_label(self) -> str:
-        return "Ren'Py" if normalize_engine(self.engine_var.get()) == ENGINE_RENPY else "RPGM"
+        engine = normalize_engine(self.engine_var.get())
+        if engine == ENGINE_RENPY:
+            return "Ren'Py"
+        if engine == ENGINE_RPGM:
+            return "RPGM"
+        if engine == ENGINE_UNITY:
+            return "Unity"
+        return engine
 
     def _update_engine_display(self) -> None:
         self.engine_display_var.set(f"Engine selecionada: {self._engine_label()}")
@@ -602,6 +685,31 @@ class TranslatorWizardApp:
                 normalized[project_key] = exe_path
         self.settings["game_exe_by_project"] = normalized
         return normalized
+
+    def _get_unity_table_selection_map(self) -> dict[str, str]:
+        raw = self.settings.get("unity_table_selection_by_project")
+        if not isinstance(raw, dict):
+            raw = {}
+            self.settings["unity_table_selection_by_project"] = raw
+        normalized: dict[str, str] = {}
+        for project_key, selection_id in raw.items():
+            if isinstance(project_key, str) and isinstance(selection_id, str):
+                normalized[project_key] = selection_id
+        self.settings["unity_table_selection_by_project"] = normalized
+        return normalized
+
+    def _get_saved_unity_table_selection_for_project(self, project: Path) -> str | None:
+        project_key = _project_settings_key(project)
+        return self._get_unity_table_selection_map().get(project_key)
+
+    def _save_unity_table_selection_for_project(self, project: Path, selection_id: str | None) -> None:
+        project_key = _project_settings_key(project)
+        selection_map = self._get_unity_table_selection_map()
+        if selection_id:
+            selection_map[project_key] = selection_id
+        else:
+            selection_map.pop(project_key, None)
+        self._save_settings()
 
     def _get_saved_game_exe_for_project(self, project: Path) -> Path | None:
         project_key = _project_settings_key(project)
@@ -645,12 +753,15 @@ class TranslatorWizardApp:
         self.settings["un_rpy_source_path"] = self.un_rpy_source_var.get().strip()
         self.settings["un_rpyc_source_path"] = self.un_rpyc_source_var.get().strip()
         self.settings["game_exe_by_project"] = self._get_game_exe_map()
+        self.settings["unity_table_selection_by_project"] = self._get_unity_table_selection_map()
         save_app_settings(self.settings)
         self._refresh_renpy_settings_labels()
         self._refresh_game_exe_info()
 
     def _refresh_renpy_prepare_ui_state(self) -> None:
-        is_renpy = normalize_engine(self.engine_var.get()) == ENGINE_RENPY
+        engine = normalize_engine(self.engine_var.get())
+        is_renpy = engine == ENGINE_RENPY
+        is_unity = engine == ENGINE_UNITY
         game_busy = self._game_running()
 
         if is_renpy and not self.renpy_prepare_visible:
@@ -660,8 +771,18 @@ class TranslatorWizardApp:
             self.renpy_prepare_frame.pack_forget()
             self.renpy_prepare_visible = False
 
+        if is_unity and not self.unity_prepare_visible:
+            self.unity_prepare_frame.pack(fill="x", pady=(12, 0))
+            self.unity_prepare_visible = True
+        if not is_unity and self.unity_prepare_visible:
+            self.unity_prepare_frame.pack_forget()
+            self.unity_prepare_visible = False
+
         for button in self.renpy_prepare_buttons:
             button.configure(state="normal" if (is_renpy and not game_busy) else "disabled")
+        for button in self.unity_prepare_buttons:
+            button.configure(state="normal" if (is_unity and not game_busy) else "disabled")
+        self.unity_table_listbox.configure(state="normal" if (is_unity and not game_busy) else "disabled")
         self.project_dir_entry.configure(state="normal" if not game_busy else "disabled")
         self.pick_project_dir_button.configure(state="normal" if not game_busy else "disabled")
         if hasattr(self, "pick_game_exe_button"):
@@ -674,11 +795,18 @@ class TranslatorWizardApp:
         self.next_button.configure(state="disabled" if game_busy else "normal")
 
         if not is_renpy:
-            self.root.minsize(*APP_BASE_MIN_SIZE)
-            self.renpy_prepare_hint.configure(
-                text="Pré-fluxo disponível apenas para Ren'Py. Para RPGM, siga o fluxo normal."
-            )
+            if self.current_step == 1:
+                self.root.minsize(*APP_STEP2_MIN_SIZE)
+            else:
+                self.root.minsize(*APP_BASE_MIN_SIZE)
             self.open_launcher_button.configure(state="disabled")
+            if is_unity:
+                self.unity_prepare_hint.configure(
+                    text=(
+                        "No Unity: detecte tables de idioma, selecione a desejada e aplique. "
+                        "Sem table selecionada, o fluxo usa apenas arquivos textuais comuns."
+                    )
+                )
             return
 
         if self.current_step == 1:
@@ -1246,6 +1374,27 @@ class TranslatorWizardApp:
             return
         self._enable_window_drop(self._iter_widget_tree(self.root))
 
+    def _ensure_window_fits_content(self) -> None:
+        self.root.update_idletasks()
+
+        req_w = max(APP_BASE_MIN_SIZE[0], self.root.winfo_reqwidth() + 8)
+        req_h = max(APP_BASE_MIN_SIZE[1], self.root.winfo_reqheight() + 8)
+
+        max_w = max(APP_BASE_MIN_SIZE[0], self.root.winfo_screenwidth() - APP_AUTO_FIT_SCREEN_MARGIN)
+        max_h = max(APP_BASE_MIN_SIZE[1], self.root.winfo_screenheight() - APP_AUTO_FIT_SCREEN_MARGIN)
+
+        target_w = min(req_w, max_w)
+        target_h = min(req_h, max_h)
+
+        cur_w = self.root.winfo_width()
+        cur_h = self.root.winfo_height()
+        if cur_w >= target_w and cur_h >= target_h:
+            return
+
+        new_w = max(cur_w, target_w)
+        new_h = max(cur_h, target_h)
+        self.root.geometry(f"{new_w}x{new_h}")
+
     def _show_step(self, step: int) -> None:
         self.current_step = max(0, min(step, len(self.step_frames) - 1))
         for idx, frame in enumerate(self.step_frames):
@@ -1284,7 +1433,10 @@ class TranslatorWizardApp:
         self._refresh_renpy_prepare_ui_state()
         self.workspace_info_var.set(f"Pasta de trabalho base: {WORKSPACE_ROOT}")
         self._refresh_game_exe_info()
+        if normalize_engine(self.engine_var.get()) == ENGINE_UNITY:
+            self._sync_unity_selection_to_core()
         self._refresh_drop_targets()
+        self._ensure_window_fits_content()
 
     def _on_back(self) -> None:
         if self._game_running():
@@ -1346,6 +1498,10 @@ class TranslatorWizardApp:
         self.renpy_version_var.set("Versão Ren'Py detectada: -")
         self.manual_version_var.set("")
         self._set_selected_launcher(None)
+        self.unity_table_candidates = []
+        self._refresh_unity_table_list_ui()
+        self.unity_tables_info_var.set("Tables Unity: detectar para escolher o idioma/table.")
+        self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
         self._refresh_game_exe_info()
         self._show_step(0)
         self._set_message("Fluxo finalizado. Escolha a engine para iniciar um novo projeto.")
@@ -1420,6 +1576,16 @@ class TranslatorWizardApp:
         self.renpy_version_var.set("Versão Ren'Py detectada: -")
         self.manual_version_var.set("")
         self._set_selected_launcher(None)
+        self.unity_table_candidates = []
+        self._refresh_unity_table_list_ui()
+        self.unity_tables_info_var.set("Tables Unity: detectar para escolher o idioma/table.")
+        self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
+        project = self._project_path_if_valid()
+        if project is not None:
+            if engine == ENGINE_UNITY:
+                self._sync_unity_selection_to_core()
+            else:
+                clear_unity_selected_table_for_project(project)
         self._refresh_game_exe_info()
         self._set_message(
             f"Engine atualizada para {self._engine_label()}. Continue para escolher a pasta do projeto."
@@ -1435,8 +1601,11 @@ class TranslatorWizardApp:
             self.project_dir_var.set(selected)
             self._refresh_game_exe_info()
             self._set_project_resolution_message()
-            if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
+            engine = normalize_engine(self.engine_var.get())
+            if engine == ENGINE_RENPY:
                 self._detect_renpy_version()
+            elif engine == ENGINE_UNITY:
+                self._detect_unity_tables()
 
     def _pick_translated_file(self) -> None:
         selected = filedialog.askopenfilename(
@@ -1465,10 +1634,13 @@ class TranslatorWizardApp:
                     return
                 self.project_dir_var.set(str(selected_dir))
                 self._refresh_game_exe_info()
-                if normalize_engine(self.engine_var.get()) == ENGINE_RENPY:
+                engine = normalize_engine(self.engine_var.get())
+                if engine == ENGINE_RENPY:
                     self._detect_renpy_version()
                 else:
                     self._set_project_resolution_message(via_drop=True, used_file_parent=used_file_parent)
+                    if engine == ENGINE_UNITY:
+                        self._detect_unity_tables()
                 return
 
             if self.drop_mode == DROP_TRANSLATED_TXT:
@@ -1665,6 +1837,27 @@ class TranslatorWizardApp:
                 self._set_message(f"Pasta do projeto definida para {self._engine_label()}.")
             return
 
+        if engine == ENGINE_UNITY:
+            project = Path(self.project_dir_var.get())
+            data_dir, data_warnings = resolve_unity_data_dir(project)
+            prefix = (
+                "Arquivo detectado no drop. Usei automaticamente a pasta dele."
+                if via_drop and used_file_parent
+                else ("Pasta recebida por arrastar e soltar." if via_drop else "Pasta do projeto definida para Unity.")
+            )
+
+            if data_dir is None:
+                warning_text = f" {' '.join(data_warnings)}" if data_warnings else ""
+                self._set_message(
+                    f"{prefix} Ainda não foi possível resolver a pasta *_Data do Unity.{warning_text}"
+                )
+                return
+
+            data_desc = describe_unity_data_dir(project, data_dir)
+            warning_text = f" {' '.join(data_warnings)}" if data_warnings else ""
+            self._set_message(f"{prefix} Pasta Unity resolvida: {data_desc}.{warning_text}")
+            return
+
         project = Path(self.project_dir_var.get())
         data_dir = resolve_rpgm_data_dir(project)
         prefix = "Arquivo detectado no drop. Usei automaticamente a pasta dele." if via_drop and used_file_parent else (
@@ -1678,11 +1871,167 @@ class TranslatorWizardApp:
         data_desc = describe_rpgm_data_dir(project, data_dir)
         self._set_message(f"{prefix} Pasta de dados RPGM resolvida: {data_desc}.")
 
+    def _refresh_unity_table_list_ui(self) -> None:
+        self.unity_table_listbox.delete(0, tk.END)
+        for _candidate_id, label in self.unity_table_candidates:
+            self.unity_table_listbox.insert(tk.END, label)
+
+    def _selected_unity_candidate_from_listbox(self) -> tuple[str, str] | None:
+        selected_idx = self.unity_table_listbox.curselection()
+        if not selected_idx:
+            return None
+        idx = selected_idx[0]
+        if idx < 0 or idx >= len(self.unity_table_candidates):
+            return None
+        return self.unity_table_candidates[idx]
+
+    def _on_unity_table_highlighted(self, _event: tk.Event | None = None) -> None:
+        if normalize_engine(self.engine_var.get()) != ENGINE_UNITY:
+            return
+        selected = self._selected_unity_candidate_from_listbox()
+        if not selected:
+            return
+        _candidate_id, label = selected
+        self._set_message(
+            f"Table em destaque: {label}. "
+            "Ela será aplicada automaticamente ao exportar/importar, ou você pode clicar em 'Usar seleção para export/import'."
+        )
+
+    def _clear_unity_table_selection(self) -> None:
+        if normalize_engine(self.engine_var.get()) != ENGINE_UNITY:
+            self._set_message("Limpeza de seleção disponível apenas para Unity.")
+            return
+        project = self._project_path_if_valid()
+        if project is None:
+            self._set_message("Defina uma pasta de projeto Unity válida primeiro.")
+            return
+
+        self.unity_table_listbox.selection_clear(0, tk.END)
+        self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
+        clear_unity_selected_table_for_project(project)
+        self._save_unity_table_selection_for_project(project, None)
+        self._set_message("Seleção de table limpa. O fluxo Unity usará apenas arquivos textuais comuns.")
+
+    def _auto_apply_unity_table_highlight(self) -> None:
+        if normalize_engine(self.engine_var.get()) != ENGINE_UNITY:
+            return
+        project = self._project_path_if_valid()
+        if project is None:
+            return
+
+        highlighted = self._selected_unity_candidate_from_listbox()
+        if highlighted is None:
+            self._sync_unity_selection_to_core()
+            return
+
+        candidate_id, label = highlighted
+        saved = self._get_saved_unity_table_selection_for_project(project)
+        if saved == candidate_id:
+            self._sync_unity_selection_to_core()
+            return
+
+        set_unity_selected_table_for_project(project, candidate_id)
+        self._save_unity_table_selection_for_project(project, candidate_id)
+        self.unity_selected_table_var.set(f"Table selecionada: {label}")
+        self._set_message(f"Table Unity aplicada automaticamente para esta exportação/importação: {label}")
+
+    def _sync_unity_selection_to_core(self) -> None:
+        if normalize_engine(self.engine_var.get()) != ENGINE_UNITY:
+            return
+        project = self._project_path_if_valid()
+        if project is None:
+            return
+        selected = self._get_saved_unity_table_selection_for_project(project)
+        if selected:
+            set_unity_selected_table_for_project(project, selected)
+        else:
+            clear_unity_selected_table_for_project(project)
+
+    def _detect_unity_tables(self) -> None:
+        if normalize_engine(self.engine_var.get()) != ENGINE_UNITY:
+            self._set_message("Detecção de tables disponível apenas para Unity.")
+            return
+        if not self._validate_project_dir():
+            return
+
+        project = self._project_path_if_valid()
+        if project is None:
+            return
+
+        candidates, warnings = detectar_tabelas_idioma_unity(project)
+        self.unity_table_candidates = [(item.candidate_id, item.label) for item in candidates]
+        self._refresh_unity_table_list_ui()
+
+        saved = self._get_saved_unity_table_selection_for_project(project)
+        saved_applied = False
+        if saved:
+            for idx, (candidate_id, label) in enumerate(self.unity_table_candidates):
+                if candidate_id == saved:
+                    self.unity_table_listbox.selection_clear(0, tk.END)
+                    self.unity_table_listbox.selection_set(idx)
+                    self.unity_table_listbox.activate(idx)
+                    self.unity_selected_table_var.set(f"Table selecionada: {label}")
+                    set_unity_selected_table_for_project(project, candidate_id)
+                    saved_applied = True
+                    break
+        if saved and not saved_applied:
+            self._save_unity_table_selection_for_project(project, None)
+            clear_unity_selected_table_for_project(project)
+            self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
+        if not saved_applied:
+            self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
+
+        if not self.unity_table_candidates:
+            self.unity_tables_info_var.set("Tables Unity detectadas: nenhuma.")
+            clear_unity_selected_table_for_project(project)
+            self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
+            warning_text = f" {' '.join(warnings)}" if warnings else ""
+            self._set_message(
+                f"Nenhuma table de idioma detectada. O fluxo Unity usará apenas arquivos textuais comuns.{warning_text}"
+            )
+            return
+
+        known = sum(1 for _id, label in self.unity_table_candidates if not label.lower().startswith("desconhecido"))
+        unknown = len(self.unity_table_candidates) - known
+        self.unity_tables_info_var.set(
+            f"Tables Unity detectadas: {len(self.unity_table_candidates)} (idioma conhecido: {known}, desconhecido: {unknown})."
+        )
+        warning_text = f" {' '.join(warnings)}" if warnings else ""
+        self._set_message(
+            "Tables detectadas. Selecione uma na lista; ela também será aplicada automaticamente no export/import."
+            + warning_text
+        )
+
+    def _apply_unity_table_selection(self) -> None:
+        if normalize_engine(self.engine_var.get()) != ENGINE_UNITY:
+            self._set_message("Seleção de table disponível apenas para Unity.")
+            return
+        project = self._project_path_if_valid()
+        if project is None:
+            self._set_message("Defina uma pasta de projeto Unity válida primeiro.")
+            return
+        if not self.unity_table_candidates:
+            self._set_message("Nenhuma table detectada. Clique em 'Detectar tables de idioma' primeiro.")
+            return
+
+        selected = self._selected_unity_candidate_from_listbox()
+        if selected is None:
+            self._set_message("Selecione uma table na lista antes de confirmar.")
+            return
+
+        candidate_id, label = selected
+        set_unity_selected_table_for_project(project, candidate_id)
+        self._save_unity_table_selection_for_project(project, candidate_id)
+        self.unity_selected_table_var.set(f"Table selecionada: {label}")
+        self._set_message(f"Table Unity selecionada para este projeto: {label}")
+
     def _run_export(self) -> None:
         if not self._validate_project_dir():
             return
 
         engine = self.engine_var.get()
+        if normalize_engine(engine) == ENGINE_UNITY:
+            self._auto_apply_unity_table_highlight()
         result = exportar(engine, self.project_dir_var.get(), WORKSPACE_ROOT)
         if not result.success:
             messagebox.showerror("Erro na exportação", result.message)
@@ -1725,6 +2074,8 @@ class TranslatorWizardApp:
             return
 
         engine = self.engine_var.get()
+        if normalize_engine(engine) == ENGINE_UNITY:
+            self._auto_apply_unity_table_highlight()
         pre = pre_validar_importacao(
             engine=engine,
             project_dir=self.project_dir_var.get(),

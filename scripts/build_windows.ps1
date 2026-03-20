@@ -51,6 +51,8 @@ Invoke-Step -Label "Gerando executável onedir com PyInstaller ..." -CmdArgs @(
     "InterfaceTradutores",
     "--collect-all",
     "tkinterdnd2",
+    "--collect-all",
+    "UnityPy",
     "--distpath",
     (Join-Path $projectRoot "dist"),
     "--workpath",

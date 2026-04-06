@@ -21,6 +21,14 @@ class WorkspacePathTests(unittest.TestCase):
         expected = Path(fake_local_app_data) / "InterfaceTradutores" / "workspace"
         self.assertEqual(root, expected)
 
+    def test_workspace_root_frozen_linux(self) -> None:
+        fake_xdg_data_home = "/tmp/test-xdg-data-home"
+        with patch("platform.system", return_value="Linux"):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": fake_xdg_data_home}, clear=False):
+                root = app.resolve_workspace_root(frozen=True)
+        expected = Path(fake_xdg_data_home) / "InterfaceTradutores" / "workspace"
+        self.assertEqual(root, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

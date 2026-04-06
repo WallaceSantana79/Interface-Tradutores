@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tkinter as tk
@@ -67,6 +68,24 @@ DROP_TRANSLATED_TXT = "translated_txt"
 MANUAL_VERSION_RE = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 
 
+def _is_windows() -> bool:
+    return platform.system() == "Windows"
+
+
+def _is_valid_launch_file(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    if _is_windows():
+        return path.suffix.lower() == ".exe"
+    return path.suffix.lower() in {".sh", ".exe"} or os.access(path, os.X_OK)
+
+
+def _launch_filetypes() -> list[tuple[str, str]]:
+    if _is_windows():
+        return [("Executável", "*.exe"), ("Todos os arquivos", "*.*")]
+    return [("Scripts/EXE", "*.sh *.exe"), ("Todos os arquivos", "*.*")]
+
+
 def _user_data_dir(app_name: str) -> Path:
     system = platform.system()
     if system == "Windows":
@@ -79,18 +98,40 @@ def _user_data_dir(app_name: str) -> Path:
 
 
 SETTINGS_PATH = _user_data_dir("InterfaceTradutores") / "settings.json"
-DEFAULT_UNREN_SOURCE = (
-    r"C:\Users\velos\Documents\Exportador-Importador-Renpy\FERRAMENTAS - TRADUZIR - RENPY\UnRen-forall.bat"
-)
-DEFAULT_FORCE_LANGUAGE = (
-    r"C:\Users\velos\Documents\Exportador-Importador-Renpy\FERRAMENTAS - TRADUZIR - RENPY\force_language.rpy"
-)
-DEFAULT_UN_RPY_SOURCE = (
-    r"C:\Users\velos\Documents\Interface-Tradutores\FERRAMENTAS - TRADUZIR - RENPY\un.rpy"
-)
-DEFAULT_UN_RPYC_SOURCE = (
-    r"C:\Users\velos\Documents\Interface-Tradutores\FERRAMENTAS - TRADUZIR - RENPY\un.rpyc"
-)
+TOOLS_DIR_NAME = "FERRAMENTAS - TRADUZIR - RENPY"
+
+
+def _pick_existing_path(candidates: list[Path], fallback: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return fallback
+
+
+def _default_tools_dir() -> Path:
+    return APP_DIR / TOOLS_DIR_NAME
+
+
+def _default_unren_source() -> str:
+    tools_dir = _default_tools_dir()
+    if _is_windows():
+        names = ["UnRen-forall.bat", "UnRen-forall.txt", "UnRen-Linux.sh", "UnRen-forall.sh"]
+    else:
+        names = ["UnRen-Linux.sh", "UnRen-forall.sh", "UnRen-forall.bat", "UnRen-forall.txt"]
+    candidates = [tools_dir / name for name in names]
+    return str(_pick_existing_path(candidates, candidates[0]))
+
+
+def _default_force_language() -> str:
+    return str(_default_tools_dir() / "force_language.rpy")
+
+
+def _default_un_rpy_source() -> str:
+    return str(_default_tools_dir() / "un.rpy")
+
+
+def _default_un_rpyc_source() -> str:
+    return str(_default_tools_dir() / "un.rpyc")
 
 
 def resolve_workspace_root(*, frozen: bool | None = None) -> Path:
@@ -106,9 +147,18 @@ WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def open_in_os(path: str | Path) -> None:
-    target = str(path)
+    target_path = Path(path)
+    target = str(target_path)
     if platform.system() == "Windows":
         os.startfile(target)  # type: ignore[attr-defined]
+        return
+    if platform.system() == "Linux" and target_path.suffix.lower() == ".exe":
+        wine_bin = shutil.which("wine")
+        if not wine_bin:
+            raise RuntimeError(
+                "Wine não encontrado. Instale o Wine para abrir executáveis .exe no Linux."
+            )
+        subprocess.Popen([wine_bin, target], cwd=str(target_path.parent))
         return
     if platform.system() == "Darwin":
         subprocess.run(["open", target], check=False)
@@ -160,17 +210,18 @@ def _project_settings_key(project_dir: str | Path) -> str:
 def _default_settings() -> dict[str, Any]:
     return {
         "launchers_root": "",
-        "unren_source_path": DEFAULT_UNREN_SOURCE,
-        "force_language_path": DEFAULT_FORCE_LANGUAGE,
-        "un_rpy_source_path": DEFAULT_UN_RPY_SOURCE,
-        "un_rpyc_source_path": DEFAULT_UN_RPYC_SOURCE,
+        "unren_source_path": _default_unren_source(),
+        "force_language_path": _default_force_language(),
+        "un_rpy_source_path": _default_un_rpy_source(),
+        "un_rpyc_source_path": _default_un_rpyc_source(),
         "game_exe_by_project": {},
         "unity_table_selection_by_project": {},
     }
 
 
 def load_app_settings() -> dict[str, Any]:
-    settings = _default_settings()
+    defaults = _default_settings()
+    settings = dict(defaults)
     if not SETTINGS_PATH.exists() or not SETTINGS_PATH.is_file():
         return settings
 
@@ -193,6 +244,15 @@ def load_app_settings() -> dict[str, Any]:
             if isinstance(raw_project, str) and isinstance(raw_exe, str):
                 normalized[raw_project] = raw_exe
         settings[map_key] = normalized
+
+    # If stored paths are stale/nonexistent, fallback to project defaults.
+    for key in ["unren_source_path", "force_language_path", "un_rpy_source_path", "un_rpyc_source_path"]:
+        raw = str(settings.get(key) or "").strip()
+        default_raw = str(defaults.get(key) or "").strip()
+        if raw and Path(raw).exists():
+            continue
+        if default_raw:
+            settings[key] = default_raw
 
     return settings
 
@@ -233,10 +293,11 @@ class TranslatorWizardApp:
         self.manual_version_var = tk.StringVar(value="")
         self.renpy_launchers_root_info_var = tk.StringVar(value="")
         self.unren_source_info_var = tk.StringVar(value="")
+        self.wine_status_var = tk.StringVar(value="")
         self.force_language_info_var = tk.StringVar(value="")
         self.un_rpy_info_var = tk.StringVar(value="")
         self.un_rpyc_info_var = tk.StringVar(value="")
-        self.game_exe_info_var = tk.StringVar(value="Executável do jogo: (defina a pasta do projeto)")
+        self.game_exe_info_var = tk.StringVar(value="Arquivo de inicialização do jogo: (defina a pasta do projeto)")
         self.unity_tables_info_var = tk.StringVar(value="Tables Unity: detectar para escolher o idioma/table.")
         self.unity_selected_table_var = tk.StringVar(value="Table selecionada: (nenhuma)")
         self.status_var = tk.StringVar(value="Etapa 1/5 - Escolha a engine")
@@ -441,6 +502,12 @@ class TranslatorWizardApp:
             command=self._pick_launchers_root,
         )
         self.pick_launchers_root_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+
+        wine_row = ttk.Frame(self.renpy_prepare_frame)
+        wine_row.pack(fill="x", padx=8)
+        ttk.Label(wine_row, textvariable=self.wine_status_var, style="Hint.TLabel").pack(
+            side="left", fill="x", expand=True, pady=(0, 6)
+        )
 
         unren_row = ttk.Frame(self.renpy_prepare_frame)
         unren_row.pack(fill="x", padx=8)
@@ -673,6 +740,17 @@ class TranslatorWizardApp:
         self.force_language_info_var.set(f"Fonte force_language: {force_source}")
         self.un_rpy_info_var.set(f"Fonte un.rpy: {un_rpy_source}")
         self.un_rpyc_info_var.set(f"Fonte un.rpyc: {un_rpyc_source}")
+        self._refresh_wine_status_label()
+
+    def _refresh_wine_status_label(self) -> None:
+        if platform.system() != "Linux":
+            self.wine_status_var.set("Status Wine: não necessário neste sistema.")
+            return
+        wine_bin = shutil.which("wine")
+        if wine_bin:
+            self.wine_status_var.set(f"Status Wine: detectado ({wine_bin}).")
+            return
+        self.wine_status_var.set("Status Wine: não detectado (necessário para abrir .exe no Linux).")
 
     def _get_game_exe_map(self) -> dict[str, str]:
         raw = self.settings.get("game_exe_by_project")
@@ -726,25 +804,25 @@ class TranslatorWizardApp:
     def _refresh_game_exe_info(self) -> None:
         project = self._project_path_if_valid()
         if project is None:
-            self.game_exe_info_var.set("Executável do jogo: (defina a pasta do projeto)")
+            self.game_exe_info_var.set("Arquivo de inicialização do jogo: (defina a pasta do projeto)")
             return
 
         saved = self._get_saved_game_exe_for_project(project)
         if saved and saved.exists() and saved.is_file():
-            self.game_exe_info_var.set(f"Executável salvo: {saved}")
+            self.game_exe_info_var.set(f"Arquivo salvo: {saved}")
             return
         if saved:
             self.game_exe_info_var.set(
-                f"Executável salvo não encontrado: {saved} (será necessário redefinir)"
+                f"Arquivo salvo não encontrado: {saved} (será necessário redefinir)"
             )
             return
 
         detected = detectar_executavel_jogo(project)
         if detected and detected.exists() and detected.is_file():
-            self.game_exe_info_var.set(f"Executável detectável: {detected} (ainda não salvo)")
+            self.game_exe_info_var.set(f"Arquivo detectável: {detected} (ainda não salvo)")
             return
 
-        self.game_exe_info_var.set("Executável do jogo: não detectado (defina manualmente)")
+        self.game_exe_info_var.set("Arquivo de inicialização não detectado (defina manualmente)")
 
     def _save_settings(self) -> None:
         self.settings["launchers_root"] = self.launchers_root_var.get().strip()
@@ -763,6 +841,7 @@ class TranslatorWizardApp:
         is_renpy = engine == ENGINE_RENPY
         is_unity = engine == ENGINE_UNITY
         game_busy = self._game_running()
+        self._refresh_wine_status_label()
 
         if is_renpy and not self.renpy_prepare_visible:
             self.renpy_prepare_frame.pack(fill="x", pady=(14, 0))
@@ -879,8 +958,8 @@ class TranslatorWizardApp:
             self._set_message("Feche o jogo em execução para alterar a fonte do UnRen.")
             return
         selected = filedialog.askopenfilename(
-            title="Selecione o UnRen (.bat ou .txt)",
-            filetypes=[("Batch ou Texto", "*.bat *.txt"), ("Todos os arquivos", "*.*")],
+            title="Selecione o script do UnRen (.bat/.sh/.txt)",
+            filetypes=[("Script/Texto", "*.bat *.sh *.txt"), ("Todos os arquivos", "*.*")],
         )
         if not selected:
             return
@@ -951,7 +1030,7 @@ class TranslatorWizardApp:
         prefer_saved: bool = True,
         allow_manual: bool = True,
         remember_selection: bool = True,
-        prompt_title: str = "Selecione o executável principal do jogo",
+        prompt_title: str = "Selecione o arquivo principal de inicialização do jogo",
     ) -> Path | None:
         project = self._project_path_if_valid()
         if project is None:
@@ -961,7 +1040,7 @@ class TranslatorWizardApp:
             saved = self._get_saved_game_exe_for_project(project)
             if saved and saved.exists() and saved.is_file():
                 self._refresh_game_exe_info()
-                self._set_message(f"Executável resolvido pelo cadastro salvo deste projeto: {saved}")
+                self._set_message(f"Arquivo resolvido pelo cadastro salvo deste projeto: {saved}")
                 return saved
 
         auto_detected = detectar_executavel_jogo(project)
@@ -970,7 +1049,7 @@ class TranslatorWizardApp:
                 self._save_game_exe_for_project(project, auto_detected)
             else:
                 self._refresh_game_exe_info()
-            self._set_message(f"Executável resolvido automaticamente: {auto_detected}")
+            self._set_message(f"Arquivo resolvido automaticamente: {auto_detected}")
             return auto_detected
 
         if not allow_manual:
@@ -980,24 +1059,27 @@ class TranslatorWizardApp:
         selected = filedialog.askopenfilename(
             title=prompt_title,
             initialdir=str(project),
-            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
+            filetypes=_launch_filetypes(),
         )
         if not selected:
             return None
 
         exe_path = Path(selected)
-        if exe_path.suffix.lower() != ".exe":
-            messagebox.showerror("Executável inválido", "Selecione um arquivo .exe válido.")
-            return None
-        if not exe_path.exists() or not exe_path.is_file():
-            messagebox.showerror("Executável inválido", f"Arquivo não encontrado: {exe_path}")
+        if not _is_valid_launch_file(exe_path):
+            if _is_windows():
+                messagebox.showerror("Executável inválido", "Selecione um arquivo .exe válido.")
+            else:
+                messagebox.showerror(
+                    "Arquivo inválido",
+                    "Selecione um arquivo válido (.sh, .exe via Wine ou arquivo com permissão de execução).",
+                )
             return None
 
         if remember_selection:
             self._save_game_exe_for_project(project, exe_path)
         else:
             self._refresh_game_exe_info()
-        self._set_message(f"Executável definido manualmente: {exe_path}")
+        self._set_message(f"Arquivo de inicialização definido manualmente: {exe_path}")
         return exe_path
 
     def _ensure_un_sources(self) -> tuple[Path, Path] | None:
@@ -1042,20 +1124,26 @@ class TranslatorWizardApp:
             return
 
         selected = filedialog.askopenfilename(
-            title="Selecione o executável principal do jogo",
+            title="Selecione o arquivo principal de inicialização do jogo",
             initialdir=str(project),
-            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
+            filetypes=_launch_filetypes(),
         )
         if not selected:
             return
 
         exe_path = Path(selected)
-        if exe_path.suffix.lower() != ".exe" or not exe_path.exists() or not exe_path.is_file():
-            messagebox.showerror("Executável inválido", "Selecione um arquivo .exe válido.")
+        if not _is_valid_launch_file(exe_path):
+            if _is_windows():
+                messagebox.showerror("Executável inválido", "Selecione um arquivo .exe válido.")
+            else:
+                messagebox.showerror(
+                    "Arquivo inválido",
+                    "Selecione um arquivo válido (.sh, .exe via Wine ou arquivo com permissão de execução).",
+                )
             return
 
         self._save_game_exe_for_project(project, exe_path)
-        self._set_message(f"Executável salvo para este projeto: {exe_path}")
+        self._set_message(f"Arquivo de inicialização salvo para este projeto: {exe_path}")
 
     def _game_running(self) -> bool:
         return processo_ativo(self.game_process)
@@ -1270,8 +1358,8 @@ class TranslatorWizardApp:
             self._set_message("Feche o jogo em execução para selecionar launcher.")
             return
         selected = filedialog.askopenfilename(
-            title="Selecione manualmente o renpy.exe",
-            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
+            title="Selecione manualmente o launcher Ren'Py",
+            filetypes=_launch_filetypes(),
         )
         if not selected:
             return
@@ -1308,6 +1396,11 @@ class TranslatorWizardApp:
         source_path = Path(self.unren_source_var.get().strip())
         project_path = Path(self.project_dir_var.get())
         destination = project_path / "UnRen-forall.bat"
+        if platform.system() != "Windows":
+            if source_path.suffix.lower() == ".bat":
+                destination = project_path / "UnRen-forall.bat"
+            else:
+                destination = project_path / "UnRen-forall.sh"
         destination_was_temp = (
             self.unren_temp_bat_path is not None
             and self.unren_temp_bat_path == destination

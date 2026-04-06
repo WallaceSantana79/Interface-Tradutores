@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import platform
 import re
 import sys
 import zlib
@@ -394,7 +396,18 @@ def carregar_placeholders(nome_ph: str | Path) -> dict[str, list[list[str]]]:
 
 
 def _detect_preferred_exe(project_dir: Path) -> Path | None:
-    candidates = [p for p in project_dir.glob("*.exe") if p.is_file()]
+    is_windows = platform.system() == "Windows"
+
+    def is_candidate(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        if path.suffix.lower() == ".exe":
+            return True
+        if is_windows:
+            return path.suffix.lower() == ".exe"
+        return path.suffix.lower() == ".sh" or os.access(path, os.X_OK)
+
+    candidates = [p for p in project_dir.iterdir() if is_candidate(p)]
     if not candidates:
         return None
 

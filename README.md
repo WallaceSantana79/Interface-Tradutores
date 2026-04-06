@@ -22,6 +22,7 @@ Sem essa dependência, o app continua funcionando normalmente pelo botão de sel
 
 - Execução em Python (desenvolvimento): `workspace/` na pasta do projeto
 - Execução em `.exe` (empacotado): `%LOCALAPPDATA%\InterfaceTradutores\workspace`
+- Execução empacotada no Linux: `${XDG_DATA_HOME:-~/.local/share}/InterfaceTradutores/workspace`
 
 ## Build de EXE (Windows / onedir)
 
@@ -41,6 +42,23 @@ dist\InterfaceTradutores\InterfaceTradutores.exe
 ```
 
 Para executar o app distribuído, rode o `InterfaceTradutores.exe` dentro da pasta `dist\InterfaceTradutores`.
+
+## Build Linux (onedir)
+
+1. Abra o terminal na raiz do projeto
+2. Rode:
+
+```bash
+./scripts/build_linux.sh --clean
+```
+
+Saída esperada:
+
+```text
+dist/InterfaceTradutores/InterfaceTradutores
+```
+
+Para executar o app distribuído no Linux, rode o binário `InterfaceTradutores` dentro da pasta `dist/InterfaceTradutores`.
 
 ## Fluxo no app
 
@@ -86,9 +104,9 @@ No Unity com Addressables (`StreamingAssets/aa`), o app pode detectar bundles de
 Na etapa 2, quando a engine selecionada é Ren'Py, existe um painel extra de preparação:
 
 - `Detectar versão`: tenta encontrar a versão lendo `renpy/version.py`, `renpy/__init__.py` e `log.txt`.
-- `Executar UnRen`: copia `UnRen-forall.bat` para a raiz do jogo, abre em modo interativo e remove o BAT temporário ao avançar etapa.
-- `Reverificar launchers`: procura versões em uma pasta configurada no padrão `renpy-<versão>-sdk`, com `renpy.exe` na raiz.
-- `Abrir launcher`: abre o `renpy.exe` compatível com a versão detectada (mesmo `major.minor`, patch mais próximo).
+- `Executar UnRen`: no Windows usa `UnRen-forall.bat`; no Linux usa script `.sh`/executável e, para `.bat`, tenta executar via Wine (se instalado), com cópia temporária para a raiz do jogo.
+- `Reverificar launchers`: procura versões em uma pasta configurada no padrão `renpy-<versão>-sdk`, com `renpy.exe` (Windows) ou `renpy.sh` (Linux) na raiz.
+- `Abrir launcher`: abre o launcher compatível com a versão detectada (mesmo `major.minor`, patch mais próximo).
 - `Selecionar launcher manual`: fallback quando não há compatível automático.
 
 Após importar no Ren'Py, o app tenta copiar `force_language.rpy` para `...\game\force_language.rpy`.
@@ -100,6 +118,7 @@ Observação de segurança:
 As configurações persistentes ficam em:
 
 - `%LOCALAPPDATA%\InterfaceTradutores\settings.json`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/InterfaceTradutores/settings.json`
 
 ## Scripts legados (compatibilidade)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 import re
 import shutil
 import subprocess
@@ -9,6 +11,22 @@ from pathlib import Path
 
 _VERSION_RE = re.compile(r"(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<patch>\d+))?")
 _LAUNCHER_DIR_RE = re.compile(r"^renpy-(\d+\.\d+(?:\.\d+)?)-sdk$", re.IGNORECASE)
+
+
+def _is_windows() -> bool:
+    return platform.system() == "Windows"
+
+
+def _is_non_windows_executable(path: Path) -> bool:
+    return path.suffix.lower() in {".sh", ".exe"} or os.access(path, os.X_OK)
+
+
+def _is_game_launch_candidate(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    if _is_windows():
+        return path.suffix.lower() == ".exe"
+    return _is_non_windows_executable(path)
 
 
 @dataclass(frozen=True)
@@ -154,8 +172,9 @@ def listar_launchers(launchers_root: str | Path) -> list[LauncherCandidate]:
         if version_tuple is None:
             continue
 
-        exe_path = child / "renpy.exe"
-        if not exe_path.exists() or not exe_path.is_file():
+        launcher_names = ["renpy.exe"] if _is_windows() else ["renpy.sh", "renpy", "renpy.exe"]
+        exe_path = next((child / name for name in launcher_names if _is_game_launch_candidate(child / name)), None)
+        if exe_path is None:
             continue
 
         keep_patch = bool(re.search(r"\d+\.\d+\.\d+", version_raw))
@@ -211,7 +230,14 @@ def preparar_descompactador(
     if not source.exists() or not source.is_file():
         raise FileNotFoundError(f"Arquivo do descompactador não encontrado: {source}")
 
-    destination = project / "UnRen-forall.bat"
+    if _is_windows():
+        destination_name = "UnRen-forall.bat"
+    else:
+        if source.suffix.lower() == ".bat":
+            destination_name = "UnRen-forall.bat"
+        else:
+            destination_name = "UnRen-forall.sh"
+    destination = project / destination_name
     if source.resolve() == destination.resolve():
         pass
     elif source.suffix.lower() == ".txt":
@@ -220,9 +246,24 @@ def preparar_descompactador(
     else:
         shutil.copy2(source, destination)
 
+    if not _is_windows():
+        destination.chmod(destination.stat().st_mode | 0o111)
+
     if abrir_interativo:
-        command = f'start "UnRen" /D "{project}" "{destination}"'
-        subprocess.Popen(command, cwd=project, shell=True)
+        if _is_windows():
+            command = f'start "UnRen" /D "{project}" "{destination}"'
+            subprocess.Popen(command, cwd=project, shell=True)
+        else:
+            if destination.suffix.lower() == ".bat":
+                wine_bin = shutil.which("wine")
+                if not wine_bin:
+                    raise RuntimeError(
+                        "Wine não encontrado. Para rodar UnRen .bat no Linux, instale o Wine "
+                        "(ex.: sudo apt install wine64)."
+                    )
+                subprocess.Popen([wine_bin, "cmd", "/c", destination.name], cwd=str(project))
+            else:
+                subprocess.Popen(["bash", str(destination)], cwd=str(project))
 
     return destination
 
@@ -256,7 +297,7 @@ def detectar_executavel_jogo(project_dir: str | Path) -> Path | None:
     if not project.exists() or not project.is_dir():
         return None
 
-    candidates = [p for p in project.glob("*.exe") if p.is_file()]
+    candidates = [p for p in project.iterdir() if _is_game_launch_candidate(p)]
     if not candidates:
         return None
 
@@ -273,7 +314,7 @@ def detectar_executavel_jogo(project_dir: str | Path) -> Path | None:
             points += 40
         if not any(token in stem for token in ignored_tokens):
             points += 25
-        if path.name.lower() == "renpy.exe":
+        if path.name.lower() in {"renpy.exe", "renpy.sh", "renpy"}:
             points -= 100
 
         size = path.stat().st_size if path.exists() else 0
@@ -291,6 +332,16 @@ def abrir_processo_jogo(exe_path: str | Path, project_dir: str | Path) -> subpro
     if not project.exists() or not project.is_dir():
         raise FileNotFoundError(f"Pasta de projeto inválida: {project}")
 
+    if not _is_windows():
+        if exe.suffix.lower() == ".exe":
+            wine_bin = shutil.which("wine")
+            if not wine_bin:
+                raise RuntimeError(
+                    "Wine não encontrado. Instale o Wine para abrir executáveis .exe no Linux."
+                )
+            return subprocess.Popen([wine_bin, str(exe)], cwd=str(project))
+        if exe.suffix.lower() == ".sh" and not os.access(exe, os.X_OK):
+            return subprocess.Popen(["bash", str(exe)], cwd=str(project))
     return subprocess.Popen([str(exe)], cwd=str(project))
 
 

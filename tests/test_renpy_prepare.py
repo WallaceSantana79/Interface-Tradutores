@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import os
 import shutil
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from translator_core.renpy_prepare import (
     aplicar_force_language,
+    abrir_processo_jogo,
     copiar_un_files_para_game,
     detectar_executavel_jogo,
     detectar_versao_renpy,
@@ -72,7 +76,8 @@ class RenpyPrepareTests(unittest.TestCase):
             folder.mkdir(parents=True)
             (folder / "renpy.exe").write_text("", encoding="utf-8")
 
-        launchers = listar_launchers(launchers_root)
+        with patch("platform.system", return_value="Windows"):
+            launchers = listar_launchers(launchers_root)
         self.assertEqual(len(launchers), 3)
 
         exact = selecionar_launcher_compativel("8.5.0", launchers)
@@ -92,7 +97,8 @@ class RenpyPrepareTests(unittest.TestCase):
         source_txt = self.root / "UnRen-forall.txt"
         source_txt.write_text("@echo off\necho teste\n", encoding="utf-8")
 
-        copied = preparar_descompactador(project, source_txt, abrir_interativo=False)
+        with patch("platform.system", return_value="Windows"):
+            copied = preparar_descompactador(project, source_txt, abrir_interativo=False)
         self.assertTrue(copied.exists())
         self.assertEqual(copied.name, "UnRen-forall.bat")
         self.assertIn("echo teste", copied.read_text(encoding="utf-8"))
@@ -119,14 +125,122 @@ class RenpyPrepareTests(unittest.TestCase):
         (project / "game_exe.exe").write_text("stub_main", encoding="utf-8")
         (project / "updater.exe").write_text("stub_updater", encoding="utf-8")
 
-        detected = detectar_executavel_jogo(project)
+        with patch("platform.system", return_value="Windows"):
+            detected = detectar_executavel_jogo(project)
         self.assertEqual(detected, project / "game_exe.exe")
 
     def test_detect_game_executable_none_when_missing(self) -> None:
         project = self.root / "game_without_exe"
         project.mkdir(parents=True)
-        detected = detectar_executavel_jogo(project)
+        with patch("platform.system", return_value="Windows"):
+            detected = detectar_executavel_jogo(project)
         self.assertIsNone(detected)
+
+    def test_listar_launchers_linux_uses_renpy_sh(self) -> None:
+        launchers_root = self.root / "renpy_versions_linux"
+        for name in ["renpy-8.5.0-sdk", "renpy-8.5.3-sdk"]:
+            folder = launchers_root / name
+            folder.mkdir(parents=True)
+            launcher = folder / "renpy.sh"
+            launcher.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            launcher.chmod(launcher.stat().st_mode | 0o111)
+
+        with patch("platform.system", return_value="Linux"):
+            launchers = listar_launchers(launchers_root)
+        self.assertEqual(len(launchers), 2)
+
+    def test_prepare_descompactador_linux_uses_sh(self) -> None:
+        project = self.root / "game_unren_linux"
+        project.mkdir(parents=True)
+        source_sh = self.root / "UnRen-forall.sh"
+        source_sh.write_text("#!/usr/bin/env bash\necho teste\n", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            copied = preparar_descompactador(project, source_sh, abrir_interativo=False)
+        self.assertTrue(copied.exists())
+        self.assertEqual(copied.name, "UnRen-forall.sh")
+        self.assertTrue(os.access(copied, os.X_OK))
+
+    def test_prepare_descompactador_linux_bat_requires_wine(self) -> None:
+        project = self.root / "game_unren_linux_bat"
+        project.mkdir(parents=True)
+        source_bat = self.root / "UnRen-forall.bat"
+        source_bat.write_text("@echo off\necho teste\n", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            with patch("shutil.which", return_value=None):
+                with self.assertRaises(RuntimeError):
+                    preparar_descompactador(project, source_bat, abrir_interativo=True)
+
+    def test_prepare_descompactador_linux_bat_uses_wine_cmd(self) -> None:
+        project = self.root / "game_unren_linux_bat_wine"
+        project.mkdir(parents=True)
+        source_bat = self.root / "UnRen-forall.bat"
+        source_bat.write_text("@echo off\necho teste\n", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            with patch("shutil.which", return_value="/usr/bin/wine"):
+                with patch("subprocess.Popen") as popen_mock:
+                    popen_mock.return_value = SimpleNamespace()
+                    copied = preparar_descompactador(project, source_bat, abrir_interativo=True)
+
+        self.assertEqual(copied.name, "UnRen-forall.bat")
+        popen_mock.assert_called_once()
+        args, kwargs = popen_mock.call_args
+        self.assertEqual(args[0], ["/usr/bin/wine", "cmd", "/c", "UnRen-forall.bat"])
+        self.assertEqual(kwargs.get("cwd"), str(project))
+
+    def test_detect_game_executable_linux_prefers_main_candidate(self) -> None:
+        project = self.root / "game_linux_bin"
+        project.mkdir(parents=True)
+        renpy_sh = project / "renpy.sh"
+        renpy_sh.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        renpy_sh.chmod(renpy_sh.stat().st_mode | 0o111)
+        game_sh = project / "game_main.sh"
+        game_sh.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        game_sh.chmod(game_sh.stat().st_mode | 0o111)
+
+        with patch("platform.system", return_value="Linux"):
+            detected = detectar_executavel_jogo(project)
+        self.assertEqual(detected, game_sh)
+
+    def test_detect_game_executable_linux_accepts_exe(self) -> None:
+        project = self.root / "game_linux_wine"
+        project.mkdir(parents=True)
+        game_exe = project / "game_main.exe"
+        game_exe.write_text("stub", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            detected = detectar_executavel_jogo(project)
+        self.assertEqual(detected, game_exe)
+
+    def test_abrir_processo_jogo_linux_exe_requires_wine(self) -> None:
+        project = self.root / "game_linux_wine_missing"
+        project.mkdir(parents=True)
+        game_exe = project / "game_main.exe"
+        game_exe.write_text("stub", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            with patch("shutil.which", return_value=None):
+                with self.assertRaises(RuntimeError):
+                    abrir_processo_jogo(game_exe, project)
+
+    def test_abrir_processo_jogo_linux_exe_uses_wine(self) -> None:
+        project = self.root / "game_linux_wine_ok"
+        project.mkdir(parents=True)
+        game_exe = project / "game_main.exe"
+        game_exe.write_text("stub", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            with patch("shutil.which", return_value="/usr/bin/wine"):
+                with patch("subprocess.Popen") as popen_mock:
+                    popen_mock.return_value = SimpleNamespace()
+                    abrir_processo_jogo(game_exe, project)
+
+        popen_mock.assert_called_once()
+        args, kwargs = popen_mock.call_args
+        self.assertEqual(args[0], ["/usr/bin/wine", str(game_exe)])
+        self.assertEqual(kwargs.get("cwd"), str(project))
 
     def test_copy_and_remove_un_files_cycle(self) -> None:
         project = self.root / "game_un_cycle"

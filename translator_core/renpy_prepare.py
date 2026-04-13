@@ -265,10 +265,10 @@ def preparar_descompactador(
     if _is_windows():
         destination_name = "UnRen-forall.bat"
     else:
-        if source.suffix.lower() == ".bat":
-            destination_name = "UnRen-forall.bat"
-        else:
+        if source.suffix.lower() == ".txt":
             destination_name = "UnRen-forall.sh"
+        else:
+            destination_name = source.name
     destination = project / destination_name
     if source.resolve() == destination.resolve():
         pass

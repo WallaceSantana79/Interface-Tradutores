@@ -1403,10 +1403,10 @@ class TranslatorWizardApp:
         project_path = Path(self.project_dir_var.get())
         destination = project_path / "UnRen-forall.bat"
         if platform.system() != "Windows":
-            if source_path.suffix.lower() == ".bat":
-                destination = project_path / "UnRen-forall.bat"
-            else:
+            if source_path.suffix.lower() == ".txt":
                 destination = project_path / "UnRen-forall.sh"
+            else:
+                destination = project_path / source_path.name
         destination_was_temp = (
             self.unren_temp_bat_path is not None
             and self.unren_temp_bat_path == destination
@@ -1424,9 +1424,9 @@ class TranslatorWizardApp:
         self.unren_temp_bat_path = created_path
         self.unren_temp_should_remove = not destination_exists
         if destination_exists:
-            self._set_message("UnRen aberto. Como já existia BAT na raiz, ele será mantido.")
+            self._set_message("UnRen aberto. Como já existia arquivo na raiz, ele será mantido.")
         else:
-            self._set_message("UnRen aberto em modo interativo. O BAT temporário será removido ao avançar etapa.")
+            self._set_message("UnRen aberto em modo interativo. O arquivo temporário será removido ao avançar etapa.")
 
     def _cleanup_unren_temp_file(self, *, notify: bool) -> None:
         if not self.unren_temp_bat_path:
@@ -1444,9 +1444,9 @@ class TranslatorWizardApp:
             removed = False
 
         if removed and notify:
-            self._set_message("BAT temporário do UnRen removido da raiz do projeto.")
+            self._set_message("Arquivo temporário do UnRen removido da raiz do projeto.")
         elif notify and not removed:
-            self._set_message("Não foi possível remover automaticamente o BAT temporário do UnRen.")
+            self._set_message("Não foi possível remover automaticamente o arquivo temporário do UnRen.")
 
         if removed:
             self.unren_temp_bat_path = None

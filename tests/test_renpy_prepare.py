@@ -161,6 +161,17 @@ class RenpyPrepareTests(unittest.TestCase):
         self.assertEqual(copied.name, "UnRen-forall.sh")
         self.assertTrue(os.access(copied, os.X_OK))
 
+    def test_prepare_descompactador_linux_preserves_selected_script_name(self) -> None:
+        project = self.root / "game_unren_linux_named"
+        project.mkdir(parents=True)
+        source_sh = self.root / "UnRen-Linux.sh"
+        source_sh.write_text("#!/usr/bin/env bash\necho teste\n", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            copied = preparar_descompactador(project, source_sh, abrir_interativo=False)
+        self.assertTrue(copied.exists())
+        self.assertEqual(copied.name, "UnRen-Linux.sh")
+
     def test_prepare_descompactador_linux_bat_requires_wine(self) -> None:
         project = self.root / "game_unren_linux_bat"
         project.mkdir(parents=True)

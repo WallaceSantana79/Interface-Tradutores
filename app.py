@@ -152,6 +152,12 @@ def open_in_os(path: str | Path) -> None:
     if platform.system() == "Windows":
         os.startfile(target)  # type: ignore[attr-defined]
         return
+    if platform.system() == "Linux" and target_path.suffix.lower() == ".sh":
+        if os.access(target_path, os.X_OK):
+            subprocess.Popen([target], cwd=str(target_path.parent))
+        else:
+            subprocess.Popen(["bash", target], cwd=str(target_path.parent))
+        return
     if platform.system() == "Linux" and target_path.suffix.lower() == ".exe":
         wine_bin = shutil.which("wine")
         if not wine_bin:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -27,6 +28,37 @@ def _is_game_launch_candidate(path: Path) -> bool:
     if _is_windows():
         return path.suffix.lower() == ".exe"
     return _is_non_windows_executable(path)
+
+
+def _open_script_in_linux_terminal(script_path: Path, cwd: Path) -> bool:
+    command = (
+        f"cd {shlex.quote(str(cwd))} && "
+        f"chmod +x {shlex.quote(script_path.name)} && "
+        f"./{shlex.quote(script_path.name)}; "
+        'echo ""; read -n 1 -s -r -p "Pressione qualquer tecla para fechar..."'
+    )
+
+    terminal_commands: list[list[str]] = []
+    x_term = shutil.which("x-terminal-emulator")
+    if x_term:
+        terminal_commands.append([x_term, "-e", "bash", "-lc", command])
+
+    gnome_term = shutil.which("gnome-terminal")
+    if gnome_term:
+        terminal_commands.append([gnome_term, "--", "bash", "-lc", command])
+
+    for term in ["konsole", "xfce4-terminal", "mate-terminal", "lxterminal", "xterm", "tilix", "alacritty", "kitty"]:
+        term_path = shutil.which(term)
+        if term_path:
+            terminal_commands.append([term_path, "-e", "bash", "-lc", command])
+
+    for terminal_cmd in terminal_commands:
+        try:
+            subprocess.Popen(terminal_cmd, cwd=str(cwd))
+            return True
+        except Exception:
+            continue
+    return False
 
 
 @dataclass(frozen=True)
@@ -263,7 +295,9 @@ def preparar_descompactador(
                     )
                 subprocess.Popen([wine_bin, "cmd", "/c", destination.name], cwd=str(project))
             else:
-                subprocess.Popen(["bash", str(destination)], cwd=str(project))
+                opened = _open_script_in_linux_terminal(destination, project)
+                if not opened:
+                    subprocess.Popen(["bash", str(destination)], cwd=str(project))
 
     return destination
 

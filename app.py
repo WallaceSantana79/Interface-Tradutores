@@ -77,13 +77,13 @@ def _is_valid_launch_file(path: Path) -> bool:
         return False
     if _is_windows():
         return path.suffix.lower() == ".exe"
-    return path.suffix.lower() in {".sh", ".exe"} or os.access(path, os.X_OK)
+    return path.suffix.lower() in {".sh", ".command", ".exe"} or os.access(path, os.X_OK)
 
 
 def _launch_filetypes() -> list[tuple[str, str]]:
     if _is_windows():
         return [("Executável", "*.exe"), ("Todos os arquivos", "*.*")]
-    return [("Scripts/EXE", "*.sh *.exe"), ("Todos os arquivos", "*.*")]
+    return [("Scripts/EXE", "*.sh *.command *.exe"), ("Todos os arquivos", "*.*")]
 
 
 def _user_data_dir(app_name: str) -> Path:
@@ -116,9 +116,11 @@ def _default_unren_source() -> str:
     tools_dir = _default_tools_dir()
     if _is_windows():
         names = ["UnRen-forall.bat", "UnRen-forall.txt", "UnRen-Linux.sh", "UnRen-forall.sh"]
+        candidates = [tools_dir / name for name in names]
     else:
         names = ["UnRen-Linux.sh", "UnRen-forall.sh", "UnRen-forall.bat", "UnRen-forall.txt"]
-    candidates = [tools_dir / name for name in names]
+        command_candidates = sorted(tools_dir.glob("UnRen*.command"))
+        candidates = command_candidates + [tools_dir / name for name in names]
     return str(_pick_existing_path(candidates, candidates[0]))
 
 
@@ -152,7 +154,7 @@ def open_in_os(path: str | Path) -> None:
     if platform.system() == "Windows":
         os.startfile(target)  # type: ignore[attr-defined]
         return
-    if platform.system() == "Linux" and target_path.suffix.lower() == ".sh":
+    if platform.system() == "Linux" and target_path.suffix.lower() in {".sh", ".command"}:
         if os.access(target_path, os.X_OK):
             subprocess.Popen([target], cwd=str(target_path.parent))
         else:
@@ -964,8 +966,8 @@ class TranslatorWizardApp:
             self._set_message("Feche o jogo em execução para alterar a fonte do UnRen.")
             return
         selected = filedialog.askopenfilename(
-            title="Selecione o script do UnRen (.bat/.sh/.txt)",
-            filetypes=[("Script/Texto", "*.bat *.sh *.txt"), ("Todos os arquivos", "*.*")],
+            title="Selecione o script do UnRen (.bat/.sh/.command/.txt)",
+            filetypes=[("Script/Texto", "*.bat *.sh *.command *.txt"), ("Todos os arquivos", "*.*")],
         )
         if not selected:
             return
@@ -1077,7 +1079,7 @@ class TranslatorWizardApp:
             else:
                 messagebox.showerror(
                     "Arquivo inválido",
-                    "Selecione um arquivo válido (.sh, .exe via Wine ou arquivo com permissão de execução).",
+                    "Selecione um arquivo válido (.sh, .command, .exe via Wine ou arquivo com permissão de execução).",
                 )
             return None
 
@@ -1144,7 +1146,7 @@ class TranslatorWizardApp:
             else:
                 messagebox.showerror(
                     "Arquivo inválido",
-                    "Selecione um arquivo válido (.sh, .exe via Wine ou arquivo com permissão de execução).",
+                    "Selecione um arquivo válido (.sh, .command, .exe via Wine ou arquivo com permissão de execução).",
                 )
             return
 

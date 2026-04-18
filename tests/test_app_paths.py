@@ -29,6 +29,11 @@ class WorkspacePathTests(unittest.TestCase):
         expected = Path(fake_xdg_data_home) / "InterfaceTradutores" / "workspace"
         self.assertEqual(root, expected)
 
+    def test_launch_filetypes_linux_include_command(self) -> None:
+        with patch("platform.system", return_value="Linux"):
+            filetypes = app._launch_filetypes()
+        self.assertIn("*.command", filetypes[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()

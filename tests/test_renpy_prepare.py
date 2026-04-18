@@ -172,6 +172,19 @@ class RenpyPrepareTests(unittest.TestCase):
         self.assertTrue(copied.exists())
         self.assertEqual(copied.name, "UnRen-Linux.sh")
 
+    def test_prepare_descompactador_linux_preserves_command_script_name(self) -> None:
+        project = self.root / "game_unren_linux_command"
+        project.mkdir(parents=True)
+        source_command = self.root / "UnRen-v1.0.11u.command"
+        source_command.write_text("#!/usr/bin/env bash\necho teste\n", encoding="utf-8")
+
+        with patch("platform.system", return_value="Linux"):
+            copied = preparar_descompactador(project, source_command, abrir_interativo=False)
+
+        self.assertTrue(copied.exists())
+        self.assertEqual(copied.name, "UnRen-v1.0.11u.command")
+        self.assertTrue(os.access(copied, os.X_OK))
+
     def test_prepare_descompactador_linux_bat_requires_wine(self) -> None:
         project = self.root / "game_unren_linux_bat"
         project.mkdir(parents=True)
@@ -251,6 +264,23 @@ class RenpyPrepareTests(unittest.TestCase):
         popen_mock.assert_called_once()
         args, kwargs = popen_mock.call_args
         self.assertEqual(args[0], ["/usr/bin/wine", str(game_exe)])
+        self.assertEqual(kwargs.get("cwd"), str(project))
+
+    def test_abrir_processo_jogo_linux_command_uses_bash_when_not_executable(self) -> None:
+        project = self.root / "game_linux_command"
+        project.mkdir(parents=True)
+        game_command = project / "game_main.command"
+        game_command.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        game_command.chmod(0o644)
+
+        with patch("platform.system", return_value="Linux"):
+            with patch("subprocess.Popen") as popen_mock:
+                popen_mock.return_value = SimpleNamespace()
+                abrir_processo_jogo(game_command, project)
+
+        popen_mock.assert_called_once()
+        args, kwargs = popen_mock.call_args
+        self.assertEqual(args[0], ["bash", str(game_command)])
         self.assertEqual(kwargs.get("cwd"), str(project))
 
     def test_copy_and_remove_un_files_cycle(self) -> None:

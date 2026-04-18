@@ -19,7 +19,7 @@ def _is_windows() -> bool:
 
 
 def _is_non_windows_executable(path: Path) -> bool:
-    return path.suffix.lower() in {".sh", ".exe"} or os.access(path, os.X_OK)
+    return path.suffix.lower() in {".sh", ".command", ".exe"} or os.access(path, os.X_OK)
 
 
 def _is_game_launch_candidate(path: Path) -> bool:
@@ -204,7 +204,7 @@ def listar_launchers(launchers_root: str | Path) -> list[LauncherCandidate]:
         if version_tuple is None:
             continue
 
-        launcher_names = ["renpy.exe"] if _is_windows() else ["renpy.sh", "renpy", "renpy.exe"]
+        launcher_names = ["renpy.exe"] if _is_windows() else ["renpy.sh", "renpy.command", "renpy", "renpy.exe"]
         exe_path = next((child / name for name in launcher_names if _is_game_launch_candidate(child / name)), None)
         if exe_path is None:
             continue
@@ -374,7 +374,7 @@ def abrir_processo_jogo(exe_path: str | Path, project_dir: str | Path) -> subpro
                     "Wine não encontrado. Instale o Wine para abrir executáveis .exe no Linux."
                 )
             return subprocess.Popen([wine_bin, str(exe)], cwd=str(project))
-        if exe.suffix.lower() == ".sh" and not os.access(exe, os.X_OK):
+        if exe.suffix.lower() in {".sh", ".command"} and not os.access(exe, os.X_OK):
             return subprocess.Popen(["bash", str(exe)], cwd=str(project))
     return subprocess.Popen([str(exe)], cwd=str(project))
 

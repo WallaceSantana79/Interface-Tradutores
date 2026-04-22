@@ -35,7 +35,12 @@ class RpgmOverlayAndRecursiveTests(unittest.TestCase):
                             {"label": "Buy now"},
                             {"label": "Sell items"},
                         ],
-                        "assets": {"icon": "img/system/IconSet.png"},
+                        "assets": {
+                            "icon": "img/system/IconSet.png",
+                            "portrait": "img/portraits/Hero.jpg",
+                            "effect": "img/effects/Blink.gif",
+                            "trailer": "movies/intro.mp4",
+                        },
                     },
                     "meta": {"plugin": "PKD_PhoneMenu"},
                 },
@@ -53,6 +58,9 @@ class RpgmOverlayAndRecursiveTests(unittest.TestCase):
         self.assertIn("Buy now", content)
         self.assertIn("Sell items", content)
         self.assertNotIn("img/system/IconSet.png", content)
+        self.assertNotIn("img/portraits/Hero.jpg", content)
+        self.assertNotIn("img/effects/Blink.gif", content)
+        self.assertNotIn("movies/intro.mp4", content)
 
         translated_path.write_text(
             content.replace("Open Store", "Abrir loja")
@@ -69,6 +77,9 @@ class RpgmOverlayAndRecursiveTests(unittest.TestCase):
         self.assertEqual(parsed["ui"]["buttons"][0]["label"], "Comprar agora")
         self.assertEqual(parsed["ui"]["buttons"][1]["label"], "Vender itens")
         self.assertEqual(parsed["ui"]["assets"]["icon"], "img/system/IconSet.png")
+        self.assertEqual(parsed["ui"]["assets"]["portrait"], "img/portraits/Hero.jpg")
+        self.assertEqual(parsed["ui"]["assets"]["effect"], "img/effects/Blink.gif")
+        self.assertEqual(parsed["ui"]["assets"]["trailer"], "movies/intro.mp4")
 
     def test_rpgm_aggressive_filter_skips_map_preset_style_fields(self) -> None:
         project = self.root / "rpgm_aggressive_filter"

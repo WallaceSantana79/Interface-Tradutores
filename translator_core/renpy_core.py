@@ -16,6 +16,23 @@ PLACEHOLDERS_FILENAME = "all_placeholders.txt"
 MAP_FILENAME = "renpy_mapa_arquivos.json"
 IMPORT_LOG_FILENAME = "renpy_import_log.txt"
 
+_TECHNICAL_FILE_EXT_RE = re.compile(
+    r"\.(png|jpe?g|gif|webp|svg|bmp|ico|mp3|ogg|wav|m4a|webm|mp4|avi|mov|"
+    r"json|js|css|ttf|otf|woff2?|rpa|rpy|rpyc|exe|dll)(?:$|\?)",
+    flags=re.IGNORECASE,
+)
+_TECHNICAL_ASSET_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_])("
+    r"(?:[A-Za-z0-9_.\-]+(?:[\\/])[A-Za-z0-9_.\-/\\ ]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|"
+    r"mp3|ogg|wav|m4a|webm|mp4|avi|mov|json|js|css|ttf|otf|woff2?|rpa|rpy|rpyc|exe|dll)(?:\?[^\s\"']*)?)"
+    r"|"
+    r"(?:[A-Za-z0-9_.\-]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|mp3|ogg|wav|m4a|webm|mp4|avi|mov|"
+    r"json|js|css|ttf|otf|woff2?|rpa|rpy|rpyc|exe|dll)(?:\?[^\s\"']*)?)"
+    r")"
+    r"(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+
 
 def expected_workspace_files() -> list[str]:
     return [TRANSLATIONS_FILENAME, PLACEHOLDERS_FILENAME, MAP_FILENAME]
@@ -57,16 +74,33 @@ def _collect_renpy_files(project: Path) -> list[Path]:
 
 
 def proteger_placeholders(texto: str) -> tuple[str, list[str]]:
-    pattern = r"(\[.*?\]|%[sd]|{\#.*?}|\{/?[a-zA-Z0-9_]+(?:=[^}]+)?\})"
-
     placeholders: list[str] = []
 
-    def repl(match: re.Match[str]) -> str:
+    def store_placeholder(raw: str) -> str:
         idx = len(placeholders)
-        placeholders.append(match.group(0))
+        placeholders.append(raw)
         return f"[PLACEHOLDER_{idx}]"
 
-    protegido = re.sub(pattern, repl, texto)
+    def repl_technical(match: re.Match[str]) -> str:
+        token = match.group(1)
+        if not token:
+            return match.group(0)
+        lower = token.lower()
+        if not _TECHNICAL_FILE_EXT_RE.search(lower):
+            return match.group(0)
+        if "/" not in token and "\\" not in token and len(token) < 5:
+            return match.group(0)
+        return store_placeholder(token)
+
+    # Primeiro protege referências técnicas de assets para evitar "traduções" de caminhos.
+    protegido = re.sub(_TECHNICAL_ASSET_REF_RE, repl_technical, texto)
+
+    pattern = r"(\[(?!PLACEHOLDER_\d+\])[^\]]*?\]|%[sd]|{\#.*?}|\{/?[a-zA-Z0-9_]+(?:=[^}]+)?\})"
+
+    def repl_default(match: re.Match[str]) -> str:
+        return store_placeholder(match.group(0))
+
+    protegido = re.sub(pattern, repl_default, protegido)
     return protegido, placeholders
 
 

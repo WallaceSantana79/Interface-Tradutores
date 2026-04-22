@@ -6,6 +6,7 @@ import unittest
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from translator_core.orchestrator import exportar, importar, pre_validar_importacao
 from translator_core.unity_core import (
@@ -67,6 +68,9 @@ class UnityCoreTests(unittest.TestCase):
                 {
                     "title": "Welcome hero",
                     "imagePath": "img/characters/Hero.png",
+                    "portraitPath": "img/characters/Hero.jpg",
+                    "fxPath": "img/effects/Blink.gif",
+                    "videoPath": "video/intro.mp4",
                     "description": "Choose your path",
                 },
                 ensure_ascii=False,
@@ -111,6 +115,9 @@ class UnityCoreTests(unittest.TestCase):
         self.assertIn("Hello adventurer", content)
         self.assertIn("Main Menu", content)
         self.assertNotIn("img/characters/Hero.png", content)
+        self.assertNotIn("img/characters/Hero.jpg", content)
+        self.assertNotIn("img/effects/Blink.gif", content)
+        self.assertNotIn("video/intro.mp4", content)
         self.assertNotIn("img/ui/play.png", content)
 
         content = content.replace("Welcome hero", "Bem-vindo heroi")
@@ -134,6 +141,9 @@ class UnityCoreTests(unittest.TestCase):
         self.assertEqual(parsed_json["title"], "Bem-vindo heroi")
         self.assertEqual(parsed_json["description"], "Escolha seu caminho")
         self.assertEqual(parsed_json["imagePath"], "img/characters/Hero.png")
+        self.assertEqual(parsed_json["portraitPath"], "img/characters/Hero.jpg")
+        self.assertEqual(parsed_json["fxPath"], "img/effects/Blink.gif")
+        self.assertEqual(parsed_json["videoPath"], "video/intro.mp4")
 
         csv_lines = csv_path.read_text(encoding="utf-8").splitlines()
         self.assertIn("btn_play,Jogar,img/ui/play.png", csv_lines)
@@ -278,7 +288,8 @@ class UnityCoreTests(unittest.TestCase):
         set_unity_selected_table_for_project(project, candidate_id)
         self.addCleanup(lambda: clear_unity_selected_table_for_project(project))
 
-        result = exportar("unity", project, self.workspace)
+        with patch("translator_core.unity_core.UnityPy", None):
+            result = exportar("unity", project, self.workspace)
         self.assertTrue(result.success, result.message)
         self.assertTrue(any("UnityPy" in warning for warning in result.warnings))
 

@@ -51,6 +51,67 @@ class CoreWorkflowTests(unittest.TestCase):
         final_text = script_path.read_text(encoding="utf-8-sig")
         self.assertIn('"Oi [player]"', final_text)
 
+    def test_renpy_preserves_technical_asset_paths_inside_translated_line(self) -> None:
+        project = self.root / "renpy_assets_in_line"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
+        script_path.write_text(
+            '# "Look images/photos/photo.png now"\n'
+            'e "Look images/photos/photo.png now"\n',
+            encoding="utf-8-sig",
+        )
+
+        export_result = exportar("renpy", project, self.workspace)
+        self.assertTrue(export_result.success, export_result.message)
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        content = translated_path.read_text(encoding="utf-8-sig")
+        self.assertNotIn("images/photos/photo.png", content)
+        translated_path.write_text(
+            content.replace("Look [PLACEHOLDER_0] now", "Olhe [PLACEHOLDER_0] agora"),
+            encoding="utf-8-sig",
+        )
+
+        import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+        self.assertTrue(import_result.success, import_result.message)
+
+        final_text = script_path.read_text(encoding="utf-8-sig")
+        self.assertIn('"Olhe images/photos/photo.png agora"', final_text)
+        self.assertNotIn("imagens/fotos/foto", final_text)
+
+    def test_renpy_preserves_pure_technical_media_refs(self) -> None:
+        project = self.root / "renpy_media_refs"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
+        script_path.write_text(
+            '# "Play intro.mp4 and sprite.gif"\n'
+            'e "Play intro.mp4 and sprite.gif"\n',
+            encoding="utf-8-sig",
+        )
+
+        export_result = exportar("renpy", project, self.workspace)
+        self.assertTrue(export_result.success, export_result.message)
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        content = translated_path.read_text(encoding="utf-8-sig")
+        self.assertNotIn("intro.mp4", content)
+        self.assertNotIn("sprite.gif", content)
+        translated_path.write_text(
+            content.replace(
+                "Play [PLACEHOLDER_0] and [PLACEHOLDER_1]",
+                "Reproduza [PLACEHOLDER_0] e [PLACEHOLDER_1]",
+            ),
+            encoding="utf-8-sig",
+        )
+
+        import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+        self.assertTrue(import_result.success, import_result.message)
+
+        final_text = script_path.read_text(encoding="utf-8-sig")
+        self.assertIn('"Reproduza intro.mp4 e sprite.gif"', final_text)
+
     def test_rpgm_export_and_import(self) -> None:
         project = self.root / "rpgm_data"
         project.mkdir(parents=True)

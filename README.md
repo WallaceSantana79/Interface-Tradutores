@@ -62,12 +62,45 @@ Para executar o app distribuído no Linux, rode o binário `InterfaceTradutores`
 
 ## Fluxo no app
 
-1. Escolher engine (`Ren'Py`, `RPGM` ou `Unity`)
-2. Selecionar pasta do projeto (com suporte a arrastar e soltar)
-3. (Ren'Py) opcional: detectar versão, executar UnRen e abrir launcher compatível
-4. Executar exportação
-5. Traduzir externamente e selecionar o TXT final
-6. Executar importação (com pergunta de backup)
+1. Escolher o modo (`Ren'Py`, `RPGM`, `Unity` ou `Buzz`)
+2. No modo jogos: selecionar pasta do projeto (com suporte a arrastar e soltar)
+3. No modo Buzz: usar a etapa 2 para gerar legendas de vídeo/áudio
+4. (Ren'Py) opcional: detectar versão, executar UnRen e abrir launcher compatível
+5. Executar exportação
+6. Traduzir externamente e selecionar o TXT final
+7. Executar importação (com pergunta de backup)
+
+## Buzz Automático (legendas)
+
+O app pode automatizar legendagem com Buzz sem precisar operar a interface manualmente.
+Para isso, selecione o modo **Buzz (Legendas de Vídeo)** na etapa 1.
+
+- Detecção: usa `flatpak` e o app `io.github.chidiwilliams.Buzz`.
+- Ação: executa `flatpak run --command=buzz io.github.chidiwilliams.Buzz add ...`.
+- Padrão configurado:
+  - tipo: `fasterwhisper`
+  - modelo: `large-v3-turbo`
+  - tarefa: `transcribe`
+  - saída: `SRT`
+  - pasta de saída: mesma pasta do vídeo
+
+No painel “Preparação Buzz (legendas)” você pode:
+
+- Selecionar vídeo/áudio;
+- Ajustar tipo de modelo, modelo, tarefa, idioma e extração de fala;
+- Escolher formatos de saída (`SRT`, `VTT`, `TXT`);
+- Definir pasta fixa de saída (ou manter mesma pasta do vídeo);
+- Clicar em **Gerar legenda (Buzz)** e confirmar a execução.
+
+As preferências ficam salvas no mesmo arquivo de configurações do app.
+
+### Observações e troubleshooting
+
+- Na primeira execução de um modelo, o Buzz pode demorar para baixar/carregar os arquivos.
+- A tarefa `translate` no fluxo Whisper geralmente produz saída em inglês.
+- Se o app mostrar que o Buzz não está disponível:
+  - verifique `flatpak --version`;
+  - instale o Buzz: `flatpak install flathub io.github.chidiwilliams.Buzz`.
 
 ## Suporte Unity (V1 offline)
 

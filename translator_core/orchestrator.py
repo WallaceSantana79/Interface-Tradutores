@@ -39,6 +39,7 @@ from .unity_core import (
 ENGINE_RENPY = "renpy"
 ENGINE_RPGM = "rpgm"
 ENGINE_UNITY = "unity"
+ENGINE_BUZZ = "buzz"
 
 
 def normalize_engine(engine: str) -> str:
@@ -49,6 +50,8 @@ def normalize_engine(engine: str) -> str:
         return ENGINE_RPGM
     if raw in {"unity"}:
         return ENGINE_UNITY
+    if raw in {"buzz", "legenda", "legendas", "subtitle", "subtitles"}:
+        return ENGINE_BUZZ
     return raw
 
 

@@ -21,6 +21,8 @@ class DropLogicTests(unittest.TestCase):
         self.sample_txt.write_text("ok", encoding="utf-8")
         self.sample_png = self.root / "image.png"
         self.sample_png.write_text("bin", encoding="utf-8")
+        self.sample_mp4 = self.root / "video.mp4"
+        self.sample_mp4.write_text("bin", encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -46,6 +48,14 @@ class DropLogicTests(unittest.TestCase):
 
     def test_resolve_translated_txt_rejects_non_txt(self) -> None:
         selected = app.resolve_translated_txt_drop_path([self.sample_png, self.game_dir])
+        self.assertIsNone(selected)
+
+    def test_resolve_buzz_media_drop_path_accepts_video(self) -> None:
+        selected = app.resolve_buzz_media_drop_path([self.sample_png, self.sample_txt, self.sample_mp4])
+        self.assertEqual(selected, self.sample_mp4)
+
+    def test_resolve_buzz_media_drop_path_rejects_non_media(self) -> None:
+        selected = app.resolve_buzz_media_drop_path([self.sample_png, self.sample_txt, self.game_dir])
         self.assertIsNone(selected)
 
 

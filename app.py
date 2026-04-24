@@ -14,12 +14,24 @@ from typing import Any
 
 from translator_core import exportar, importar, pre_validar_importacao
 from translator_core.orchestrator import (
+    ENGINE_BUZZ,
     ENGINE_RENPY,
     ENGINE_RPGM,
     ENGINE_UNITY,
     engine_workspace_dir,
     normalize_engine,
     translation_filename_for_engine,
+)
+from translator_core.buzz_prepare import (
+    BUZZ_LANGUAGE_MENU_OPTIONS,
+    BUZZ_MODEL_SIZES,
+    BUZZ_MODEL_TYPES,
+    BUZZ_OUTPUT_FORMATS,
+    BUZZ_TASKS,
+    BuzzRunConfig,
+    detectar_buzz,
+    finalizar_execucao_buzz,
+    iniciar_execucao_buzz,
 )
 from translator_core.rpgm_core import describe_rpgm_data_dir, resolve_rpgm_data_dir
 from translator_core.renpy_prepare import (
@@ -55,11 +67,11 @@ except ImportError:
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "v1.11"
+APP_VERSION = "v1.12"
 APP_DEFAULT_GEOMETRY = "780x560"
 APP_BASE_MIN_SIZE = (700, 500)
-APP_RENPY_STEP2_MIN_SIZE = (760, 680)
-APP_STEP2_MIN_SIZE = (760, 620)
+APP_RENPY_STEP2_MIN_SIZE = (740, 640)
+APP_STEP2_MIN_SIZE = (740, 580)
 APP_AUTO_FIT_SCREEN_MARGIN = 80
 
 DROP_DISABLED = "disabled"
@@ -211,6 +223,35 @@ def resolve_translated_txt_drop_path(paths: list[Path]) -> Path | None:
     return None
 
 
+def resolve_buzz_media_drop_path(paths: list[Path]) -> Path | None:
+    allowed = {
+        ".aac",
+        ".ac3",
+        ".aiff",
+        ".amr",
+        ".avi",
+        ".flac",
+        ".flv",
+        ".m4a",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".ogg",
+        ".opus",
+        ".wav",
+        ".webm",
+        ".wma",
+    }
+    for path in paths:
+        if path.exists() and path.is_file() and path.suffix.lower() in allowed:
+            return path
+    return None
+
+
 def _project_settings_key(project_dir: str | Path) -> str:
     return os.path.normcase(os.path.normpath(str(Path(project_dir).resolve())))
 
@@ -224,6 +265,15 @@ def _default_settings() -> dict[str, Any]:
         "un_rpyc_source_path": _default_un_rpyc_source(),
         "game_exe_by_project": {},
         "unity_table_selection_by_project": {},
+        "buzz_model_type": "fasterwhisper",
+        "buzz_model_size": "large-v3-turbo",
+        "buzz_task": "transcribe",
+        "buzz_language": "Detectar idioma (auto)",
+        "buzz_word_timestamps": False,
+        "buzz_extract_speech": False,
+        "buzz_output_formats": ["srt"],
+        "buzz_output_same_dir": True,
+        "buzz_output_directory": "",
     }
 
 
@@ -238,10 +288,40 @@ def load_app_settings() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return settings
 
-    for key in ["launchers_root", "unren_source_path", "force_language_path", "un_rpy_source_path", "un_rpyc_source_path"]:
+    for key in [
+        "launchers_root",
+        "unren_source_path",
+        "force_language_path",
+        "un_rpy_source_path",
+        "un_rpyc_source_path",
+        "buzz_model_type",
+        "buzz_model_size",
+        "buzz_task",
+        "buzz_language",
+        "buzz_output_directory",
+    ]:
         value = loaded.get(key)
         if isinstance(value, str):
             settings[key] = value
+
+    buzz_extract_speech = loaded.get("buzz_extract_speech")
+    if isinstance(buzz_extract_speech, bool):
+        settings["buzz_extract_speech"] = buzz_extract_speech
+    buzz_word_timestamps = loaded.get("buzz_word_timestamps")
+    if isinstance(buzz_word_timestamps, bool):
+        settings["buzz_word_timestamps"] = buzz_word_timestamps
+
+    buzz_output_same_dir = loaded.get("buzz_output_same_dir")
+    if isinstance(buzz_output_same_dir, bool):
+        settings["buzz_output_same_dir"] = buzz_output_same_dir
+
+    output_formats = loaded.get("buzz_output_formats")
+    if isinstance(output_formats, list):
+        normalized_formats = [
+            value for value in output_formats if isinstance(value, str) and value in BUZZ_OUTPUT_FORMATS
+        ]
+        if normalized_formats:
+            settings["buzz_output_formats"] = normalized_formats
 
     for map_key in ["game_exe_by_project", "unity_table_selection_by_project"]:
         saved_map = loaded.get(map_key)
@@ -308,6 +388,19 @@ class TranslatorWizardApp:
         self.game_exe_info_var = tk.StringVar(value="Arquivo de inicialização do jogo: (defina a pasta do projeto)")
         self.unity_tables_info_var = tk.StringVar(value="Tables Unity: detectar para escolher o idioma/table.")
         self.unity_selected_table_var = tk.StringVar(value="Table selecionada: (nenhuma)")
+        self.buzz_status_var = tk.StringVar(value="Buzz: verificando disponibilidade...")
+        self.buzz_video_var = tk.StringVar(value="")
+        self.buzz_model_type_var = tk.StringVar(value=self.settings["buzz_model_type"])
+        self.buzz_model_size_var = tk.StringVar(value=self.settings["buzz_model_size"])
+        self.buzz_task_var = tk.StringVar(value=self.settings["buzz_task"])
+        self.buzz_language_var = tk.StringVar(value=self.settings["buzz_language"])
+        self.buzz_word_timestamps_var = tk.BooleanVar(value=bool(self.settings["buzz_word_timestamps"]))
+        self.buzz_extract_speech_var = tk.BooleanVar(value=bool(self.settings["buzz_extract_speech"]))
+        self.buzz_output_same_dir_var = tk.BooleanVar(value=bool(self.settings["buzz_output_same_dir"]))
+        self.buzz_output_dir_var = tk.StringVar(value=self.settings["buzz_output_directory"])
+        self.buzz_output_srt_var = tk.BooleanVar(value=False)
+        self.buzz_output_vtt_var = tk.BooleanVar(value=False)
+        self.buzz_output_txt_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Etapa 1/5 - Escolha a engine")
         self.message_var = tk.StringVar(value="Escolha a engine para iniciar.")
         self.workspace_info_var = tk.StringVar(value=f"Pasta de trabalho base: {WORKSPACE_ROOT}")
@@ -326,9 +419,17 @@ class TranslatorWizardApp:
         self.game_process_mode: str | None = None
         self.running_game_exe: Path | None = None
         self.unity_table_candidates: list[tuple[str, str]] = []
+        self.buzz_process: subprocess.Popen[str] | None = None
+        self.buzz_running_config: BuzzRunConfig | None = None
+        self.buzz_running_stdout: str = ""
+        self.buzz_running_stderr: str = ""
+        self.buzz_video_var.trace_add("write", lambda *_args: self._refresh_renpy_prepare_ui_state())
 
         self._build_layout()
+        self._normalize_buzz_settings()
+        self._apply_buzz_output_vars_from_settings()
         self._refresh_renpy_settings_labels()
+        self._refresh_buzz_status_label()
         self._update_engine_display()
         self._refresh_game_exe_info()
         self._show_step(0)
@@ -392,7 +493,7 @@ class TranslatorWizardApp:
 
     def _build_step_engine(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
-        ttk.Label(frame, text="1) Escolha o tipo de projeto").pack(anchor="w", pady=(2, 12))
+        ttk.Label(frame, text="1) Escolha o modo").pack(anchor="w", pady=(2, 12))
         ttk.Radiobutton(
             frame,
             text="Ren'Py",
@@ -414,31 +515,41 @@ class TranslatorWizardApp:
             variable=self.engine_var,
             command=self._on_engine_change,
         ).pack(anchor="w", pady=4)
+        ttk.Radiobutton(
+            frame,
+            text="Buzz (Legendas de Vídeo)",
+            value=ENGINE_BUZZ,
+            variable=self.engine_var,
+            command=self._on_engine_change,
+        ).pack(anchor="w", pady=4)
         ttk.Label(
             frame,
-            text="O restante do fluxo será ajustado automaticamente para a engine escolhida.",
+            text="O restante do fluxo será ajustado automaticamente para o modo escolhido.",
         ).pack(anchor="w", pady=(12, 0))
         return frame
 
     def _build_step_project(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
-        ttk.Label(frame, text="2) Selecione (ou arraste) a pasta do projeto").pack(
+        self.step2_title_var = tk.StringVar(value="2) Selecione (ou arraste) a pasta do projeto")
+        self.step2_title_label = ttk.Label(frame, textvariable=self.step2_title_var)
+        self.step2_title_label.pack(
             anchor="w", pady=(2, 12)
         )
 
-        row = ttk.Frame(frame)
-        row.pack(fill="x")
-        self.project_dir_entry = ttk.Entry(row, textvariable=self.project_dir_var)
+        self.project_selection_row = ttk.Frame(frame)
+        self.project_selection_row.pack(fill="x")
+        self.project_dir_entry = ttk.Entry(self.project_selection_row, textvariable=self.project_dir_var)
         self.project_dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.pick_project_dir_button = ttk.Button(
-            row, text="Selecionar pasta", command=self._pick_project_dir
+            self.project_selection_row, text="Selecionar pasta", command=self._pick_project_dir
         )
         self.pick_project_dir_button.pack(side="left")
 
         hint = "Você pode arrastar a pasta para qualquer área da janela nesta etapa." if HAS_DND else (
             "Arrastar e soltar indisponível (instale tkinterdnd2 para habilitar)."
         )
-        ttk.Label(frame, text=hint).pack(anchor="w", pady=(10, 0))
+        self.project_hint_label = ttk.Label(frame, text=hint)
+        self.project_hint_label.pack(anchor="w", pady=(10, 0))
 
         self.renpy_prepare_frame = ttk.LabelFrame(frame, text="Preparação Ren'Py (pré-fluxo)")
         self.renpy_prepare_frame.pack(fill="x", pady=(14, 0))
@@ -642,6 +753,178 @@ class TranslatorWizardApp:
             self.apply_unity_table_button,
             self.clear_unity_table_button,
         ]
+
+        self.buzz_prepare_frame = ttk.LabelFrame(frame, text="Buzz (legendas)")
+        self.buzz_prepare_frame.pack(fill="x", pady=(10, 0))
+        self.buzz_prepare_visible = True
+
+        ttk.Label(self.buzz_prepare_frame, textvariable=self.buzz_status_var).pack(
+            anchor="w", padx=8, pady=(4, 2)
+        )
+
+        buzz_video_row = ttk.Frame(self.buzz_prepare_frame)
+        buzz_video_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Entry(buzz_video_row, textvariable=self.buzz_video_var).pack(
+            side="left", fill="x", expand=True, padx=(0, 8)
+        )
+        self.pick_buzz_video_button = ttk.Button(
+            buzz_video_row,
+            text="Selecionar vídeo/áudio",
+            command=self._pick_buzz_video_file,
+        )
+        self.pick_buzz_video_button.pack(side="left")
+
+        config_row = ttk.Frame(self.buzz_prepare_frame)
+        config_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(config_row, text="Tipo:").pack(side="left")
+        self.buzz_model_type_combo = ttk.Combobox(
+            config_row,
+            textvariable=self.buzz_model_type_var,
+            values=list(BUZZ_MODEL_TYPES),
+            state="readonly",
+            width=12,
+        )
+        self.buzz_model_type_combo.pack(side="left", padx=(4, 8))
+        self.buzz_model_type_combo.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+        ttk.Label(config_row, text="Modelo:").pack(side="left")
+        self.buzz_model_size_combo = ttk.Combobox(
+            config_row,
+            textvariable=self.buzz_model_size_var,
+            values=list(BUZZ_MODEL_SIZES),
+            state="readonly",
+            width=13,
+        )
+        self.buzz_model_size_combo.pack(side="left", padx=(4, 8))
+        self.buzz_model_size_combo.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+        ttk.Label(config_row, text="Task:").pack(side="left")
+        self.buzz_task_combo = ttk.Combobox(
+            config_row,
+            textvariable=self.buzz_task_var,
+            values=list(BUZZ_TASKS),
+            state="readonly",
+            width=10,
+        )
+        self.buzz_task_combo.pack(side="left", padx=(4, 6))
+        self.buzz_task_combo.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+
+        extra_row = ttk.Frame(self.buzz_prepare_frame)
+        extra_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(extra_row, text="Idioma:").pack(side="left")
+        self.buzz_language_combo = ttk.Combobox(
+            extra_row,
+            textvariable=self.buzz_language_var,
+            values=list(BUZZ_LANGUAGE_MENU_OPTIONS),
+            state="readonly",
+            width=22,
+        )
+        self.buzz_language_combo.pack(side="left", padx=(4, 10))
+        self.buzz_language_combo.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+        self.buzz_word_timestamps_check = ttk.Checkbutton(
+            extra_row,
+            text="Tempos em nível de palavra",
+            variable=self.buzz_word_timestamps_var,
+            command=self._save_settings,
+        )
+        self.buzz_word_timestamps_check.pack(side="left", padx=(0, 10))
+        self.buzz_extract_speech_check = ttk.Checkbutton(
+            extra_row,
+            text="Extrair fala",
+            variable=self.buzz_extract_speech_var,
+            command=self._save_settings,
+        )
+        self.buzz_extract_speech_check.pack(side="left")
+
+        output_row = ttk.Frame(self.buzz_prepare_frame)
+        output_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(output_row, text="Saída:").pack(side="left")
+        self.buzz_srt_check = ttk.Checkbutton(
+            output_row,
+            text="SRT",
+            variable=self.buzz_output_srt_var,
+            command=self._save_settings,
+        )
+        self.buzz_srt_check.pack(side="left", padx=(8, 6))
+        self.buzz_vtt_check = ttk.Checkbutton(
+            output_row,
+            text="VTT",
+            variable=self.buzz_output_vtt_var,
+            command=self._save_settings,
+        )
+        self.buzz_vtt_check.pack(side="left", padx=(0, 6))
+        self.buzz_txt_check = ttk.Checkbutton(
+            output_row,
+            text="TXT",
+            variable=self.buzz_output_txt_var,
+            command=self._save_settings,
+        )
+        self.buzz_txt_check.pack(side="left")
+
+        output_dir_row = ttk.Frame(self.buzz_prepare_frame)
+        output_dir_row.pack(fill="x", padx=8, pady=(0, 4))
+        self.buzz_same_dir_check = ttk.Checkbutton(
+            output_dir_row,
+            text="Salvar na mesma pasta do vídeo",
+            variable=self.buzz_output_same_dir_var,
+            command=self._on_buzz_output_dir_mode_change,
+        )
+        self.buzz_same_dir_check.pack(side="left")
+
+        output_dir_pick_row = ttk.Frame(self.buzz_prepare_frame)
+        output_dir_pick_row.pack(fill="x", padx=8, pady=(0, 6))
+        self.buzz_output_dir_entry = ttk.Entry(
+            output_dir_pick_row,
+            textvariable=self.buzz_output_dir_var,
+        )
+        self.buzz_output_dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.pick_buzz_output_dir_button = ttk.Button(
+            output_dir_pick_row,
+            text="Selecionar pasta de saída",
+            command=self._pick_buzz_output_dir,
+        )
+        self.pick_buzz_output_dir_button.pack(side="left")
+
+        buzz_action_row = ttk.Frame(self.buzz_prepare_frame)
+        buzz_action_row.pack(fill="x", padx=8, pady=(0, 6))
+        self.refresh_buzz_status_button = ttk.Button(
+            buzz_action_row,
+            text="Verificar Buzz",
+            command=self._refresh_buzz_status_label,
+        )
+        self.refresh_buzz_status_button.pack(side="left", padx=(0, 8))
+        self.run_buzz_button = ttk.Button(
+            buzz_action_row,
+            text="Gerar legenda (Buzz)",
+            command=self._confirm_and_run_buzz,
+        )
+        self.run_buzz_button.pack(side="left")
+
+        self.buzz_hint_label = ttk.Label(
+            self.buzz_prepare_frame,
+            text=(
+                "Padrão: transcribe + large-v3-turbo + SRT | "
+                "A tarefa 'translate' no Buzz tende a produzir saída em inglês."
+            ),
+            style="Hint.TLabel",
+        )
+        self.buzz_hint_label.pack(anchor="w", padx=8, pady=(0, 6))
+
+        self.buzz_prepare_buttons = [
+            self.pick_buzz_video_button,
+            self.buzz_model_type_combo,
+            self.buzz_model_size_combo,
+            self.buzz_task_combo,
+            self.buzz_language_combo,
+            self.buzz_word_timestamps_check,
+            self.buzz_extract_speech_check,
+            self.buzz_srt_check,
+            self.buzz_vtt_check,
+            self.buzz_txt_check,
+            self.buzz_same_dir_check,
+            self.buzz_output_dir_entry,
+            self.pick_buzz_output_dir_button,
+            self.refresh_buzz_status_button,
+            self.run_buzz_button,
+        ]
         return frame
 
     def _build_step_export(self, parent: ttk.Frame) -> ttk.Frame:
@@ -732,6 +1015,8 @@ class TranslatorWizardApp:
             return "RPGM"
         if engine == ENGINE_UNITY:
             return "Unity"
+        if engine == ENGINE_BUZZ:
+            return "Buzz (Legendas)"
         return engine
 
     def _update_engine_display(self) -> None:
@@ -759,6 +1044,214 @@ class TranslatorWizardApp:
             self.wine_status_var.set(f"Status Wine: detectado ({wine_bin}).")
             return
         self.wine_status_var.set("Status Wine: não detectado (necessário para abrir .exe no Linux).")
+
+    def _normalize_buzz_settings(self) -> None:
+        if self.buzz_model_type_var.get().strip() not in BUZZ_MODEL_TYPES:
+            self.buzz_model_type_var.set("fasterwhisper")
+        if self.buzz_model_size_var.get().strip() not in BUZZ_MODEL_SIZES:
+            self.buzz_model_size_var.set("large-v3-turbo")
+        if self.buzz_task_var.get().strip() not in BUZZ_TASKS:
+            self.buzz_task_var.set("transcribe")
+        language_value = self.buzz_language_var.get().strip()
+        if not language_value:
+            self.buzz_language_var.set("Detectar idioma (auto)")
+
+    def _apply_buzz_output_vars_from_settings(self) -> None:
+        raw = self.settings.get("buzz_output_formats")
+        output_formats: list[str]
+        if isinstance(raw, list):
+            output_formats = [value for value in raw if isinstance(value, str) and value in BUZZ_OUTPUT_FORMATS]
+        else:
+            output_formats = []
+        if not output_formats:
+            output_formats = ["srt"]
+        self.buzz_output_srt_var.set("srt" in output_formats)
+        self.buzz_output_vtt_var.set("vtt" in output_formats)
+        self.buzz_output_txt_var.set("txt" in output_formats)
+
+    def _selected_buzz_output_formats(self) -> list[str]:
+        output_formats: list[str] = []
+        if self.buzz_output_srt_var.get():
+            output_formats.append("srt")
+        if self.buzz_output_vtt_var.get():
+            output_formats.append("vtt")
+        if self.buzz_output_txt_var.get():
+            output_formats.append("txt")
+        if not output_formats:
+            output_formats = ["srt"]
+        return output_formats
+
+    def _refresh_buzz_output_dir_ui_state(self) -> None:
+        is_same_dir = bool(self.buzz_output_same_dir_var.get())
+        entry_state = "disabled" if is_same_dir else "normal"
+        button_state = "disabled" if is_same_dir else "normal"
+        if self._game_running() or self._buzz_running():
+            entry_state = "disabled"
+            button_state = "disabled"
+        self.buzz_output_dir_entry.configure(state=entry_state)
+        self.pick_buzz_output_dir_button.configure(state=button_state)
+
+    def _on_buzz_output_dir_mode_change(self) -> None:
+        self._refresh_buzz_output_dir_ui_state()
+        self._save_settings()
+
+    def _refresh_buzz_status_label(self) -> None:
+        detection = detectar_buzz()
+        self.buzz_status_var.set(f"Buzz: {detection.message}")
+
+    def _pick_buzz_video_file(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de selecionar mídia para Buzz.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Selecione vídeo/áudio para legendagem (Buzz)",
+            filetypes=[
+                ("Mídia", "*.mp4 *.mkv *.mov *.webm *.avi *.mp3 *.wav *.m4a *.flac *.ogg *.opus"),
+                ("Todos os arquivos", "*.*"),
+            ],
+        )
+        if not selected:
+            return
+        self.buzz_video_var.set(selected)
+        self._set_message("Arquivo de mídia selecionado para legendagem com Buzz.")
+
+    def _pick_buzz_output_dir(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de alterar pasta de saída do Buzz.")
+            return
+        if self.buzz_output_same_dir_var.get():
+            self._set_message("Desmarque 'Salvar na mesma pasta do vídeo' para escolher outra pasta.")
+            return
+        selected = filedialog.askdirectory(title="Selecione a pasta de saída das legendas (Buzz)")
+        if not selected:
+            return
+        self.buzz_output_dir_var.set(selected)
+        self._save_settings()
+        self._set_message("Pasta de saída do Buzz atualizada.")
+
+    def _build_buzz_config_from_ui(self) -> BuzzRunConfig:
+        output_directory: Path | None = None
+        if not self.buzz_output_same_dir_var.get():
+            raw_output = self.buzz_output_dir_var.get().strip()
+            if not raw_output:
+                raise ValueError("Defina uma pasta de saída do Buzz ou marque a opção de mesma pasta.")
+            output_directory = Path(raw_output)
+
+        return BuzzRunConfig(
+            input_path=Path(self.buzz_video_var.get().strip()),
+            model_type=self.buzz_model_type_var.get().strip(),
+            model_size=self.buzz_model_size_var.get().strip(),
+            task=self.buzz_task_var.get().strip(),
+            language=self.buzz_language_var.get().strip(),
+            word_timestamps=bool(self.buzz_word_timestamps_var.get()),
+            extract_speech=bool(self.buzz_extract_speech_var.get()),
+            output_formats=tuple(self._selected_buzz_output_formats()),
+            output_directory=output_directory,
+            hide_gui=True,
+        )
+
+    def _confirm_and_run_buzz(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de iniciar o Buzz.")
+            return
+        if self.buzz_process is not None and self.buzz_process.poll() is None:
+            self._set_message("Já existe uma execução do Buzz em andamento.")
+            return
+
+        self._normalize_buzz_settings()
+        self._save_settings()
+
+        try:
+            config = self._build_buzz_config_from_ui()
+            detection = detectar_buzz()
+            if not detection.available:
+                raise ValueError(detection.message)
+        except ValueError as exc:
+            messagebox.showerror("Configuração Buzz inválida", str(exc))
+            self._set_message(str(exc))
+            return
+
+        output_mode_text = (
+            "mesma pasta do vídeo"
+            if config.output_directory is None
+            else str(config.output_directory)
+        )
+        should_run = messagebox.askyesno(
+            "Confirmar geração de legenda",
+            (
+                "Executar Buzz com estas opções?\n\n"
+                f"Arquivo: {config.input_path}\n"
+                f"Tipo: {config.model_type}\n"
+                f"Modelo: {config.model_size}\n"
+                f"Tarefa: {config.task}\n"
+                f"Idioma: {config.language or 'auto'}\n"
+                f"Tempos em nível de palavra: {'sim' if config.word_timestamps else 'não'}\n"
+                f"Formato(s): {', '.join(config.output_formats)}\n"
+                f"Saída: {output_mode_text}"
+            ),
+        )
+        if not should_run:
+            self._set_message("Execução Buzz cancelada.")
+            return
+
+        try:
+            self.buzz_process = iniciar_execucao_buzz(config)
+        except Exception as exc:
+            messagebox.showerror("Falha ao iniciar Buzz", str(exc))
+            self._set_message(f"Falha ao iniciar Buzz: {exc}")
+            return
+
+        self.buzz_running_config = config
+        self.buzz_running_stdout = ""
+        self.buzz_running_stderr = ""
+        self._set_message("Buzz em execução... isso pode levar alguns minutos no primeiro uso do modelo.")
+        self._refresh_renpy_prepare_ui_state()
+        self.root.after(600, self._monitor_buzz_process)
+
+    def _monitor_buzz_process(self) -> None:
+        if self.buzz_process is None:
+            return
+        if self.buzz_process.poll() is None:
+            if self.root.winfo_exists():
+                self.root.after(600, self._monitor_buzz_process)
+            return
+
+        stdout, stderr = self.buzz_process.communicate()
+        returncode = self.buzz_process.returncode or 0
+        config = self.buzz_running_config
+
+        self.buzz_process = None
+        self.buzz_running_config = None
+        self.buzz_running_stdout = stdout or ""
+        self.buzz_running_stderr = stderr or ""
+        self._refresh_renpy_prepare_ui_state()
+
+        if config is None:
+            self._set_message("Execução Buzz finalizada, mas sem configuração associada.")
+            return
+
+        result = finalizar_execucao_buzz(
+            config=config,
+            returncode=returncode,
+            stdout=self.buzz_running_stdout,
+            stderr=self.buzz_running_stderr,
+        )
+        if not result.success:
+            messagebox.showerror("Erro no Buzz", result.message)
+            self._set_message(result.message)
+            return
+
+        details = result.message
+        if result.generated_files:
+            details += "\n\nArquivos gerados:\n" + "\n".join(f"- {path}" for path in result.generated_files)
+        if result.warnings:
+            details += "\n\nAlertas:\n" + "\n".join(f"- {warning}" for warning in result.warnings)
+        messagebox.showinfo("Buzz concluído", details)
+
+        if result.generated_files:
+            self._set_message(f"Buzz finalizado com sucesso. Arquivo principal: {result.generated_files[0]}")
+        else:
+            self._set_message("Buzz finalizado. Revise a pasta de saída para confirmar os arquivos.")
 
     def _get_game_exe_map(self) -> dict[str, str]:
         raw = self.settings.get("game_exe_by_project")
@@ -838,6 +1331,15 @@ class TranslatorWizardApp:
         self.settings["force_language_path"] = self.force_language_source_var.get().strip()
         self.settings["un_rpy_source_path"] = self.un_rpy_source_var.get().strip()
         self.settings["un_rpyc_source_path"] = self.un_rpyc_source_var.get().strip()
+        self.settings["buzz_model_type"] = self.buzz_model_type_var.get().strip()
+        self.settings["buzz_model_size"] = self.buzz_model_size_var.get().strip()
+        self.settings["buzz_task"] = self.buzz_task_var.get().strip()
+        self.settings["buzz_language"] = self.buzz_language_var.get().strip()
+        self.settings["buzz_word_timestamps"] = bool(self.buzz_word_timestamps_var.get())
+        self.settings["buzz_extract_speech"] = bool(self.buzz_extract_speech_var.get())
+        self.settings["buzz_output_same_dir"] = bool(self.buzz_output_same_dir_var.get())
+        self.settings["buzz_output_directory"] = self.buzz_output_dir_var.get().strip()
+        self.settings["buzz_output_formats"] = self._selected_buzz_output_formats()
         self.settings["game_exe_by_project"] = self._get_game_exe_map()
         self.settings["unity_table_selection_by_project"] = self._get_unity_table_selection_map()
         save_app_settings(self.settings)
@@ -848,8 +1350,27 @@ class TranslatorWizardApp:
         engine = normalize_engine(self.engine_var.get())
         is_renpy = engine == ENGINE_RENPY
         is_unity = engine == ENGINE_UNITY
+        is_buzz = engine == ENGINE_BUZZ
         game_busy = self._game_running()
+        buzz_busy = self._buzz_running()
+        app_busy = game_busy or buzz_busy
         self._refresh_wine_status_label()
+
+        if self.current_step == 1 and is_buzz:
+            self.step2_title_var.set("2) Buzz: selecione vídeo/áudio e gere legenda")
+        else:
+            self.step2_title_var.set("2) Selecione (ou arraste) a pasta do projeto")
+
+        if is_buzz:
+            if self.project_selection_row.winfo_manager():
+                self.project_selection_row.pack_forget()
+            if self.project_hint_label.winfo_manager():
+                self.project_hint_label.pack_forget()
+        else:
+            if not self.project_selection_row.winfo_manager():
+                self.project_selection_row.pack(fill="x")
+            if not self.project_hint_label.winfo_manager():
+                self.project_hint_label.pack(anchor="w", pady=(10, 0))
 
         if is_renpy and not self.renpy_prepare_visible:
             self.renpy_prepare_frame.pack(fill="x", pady=(14, 0))
@@ -865,21 +1386,37 @@ class TranslatorWizardApp:
             self.unity_prepare_frame.pack_forget()
             self.unity_prepare_visible = False
 
+        if is_buzz and not self.buzz_prepare_visible:
+            self.buzz_prepare_frame.pack(fill="x", pady=(10, 0))
+            self.buzz_prepare_visible = True
+        if not is_buzz and self.buzz_prepare_visible:
+            self.buzz_prepare_frame.pack_forget()
+            self.buzz_prepare_visible = False
+
         for button in self.renpy_prepare_buttons:
-            button.configure(state="normal" if (is_renpy and not game_busy) else "disabled")
+            button.configure(state="normal" if (is_renpy and not app_busy) else "disabled")
         for button in self.unity_prepare_buttons:
-            button.configure(state="normal" if (is_unity and not game_busy) else "disabled")
-        self.unity_table_listbox.configure(state="normal" if (is_unity and not game_busy) else "disabled")
-        self.project_dir_entry.configure(state="normal" if not game_busy else "disabled")
-        self.pick_project_dir_button.configure(state="normal" if not game_busy else "disabled")
+            button.configure(state="normal" if (is_unity and not app_busy) else "disabled")
+        for widget in self.buzz_prepare_buttons:
+            widget.configure(state="normal" if (is_buzz and not app_busy) else "disabled")
+        self.unity_table_listbox.configure(state="normal" if (is_unity and not app_busy) else "disabled")
+        self.project_dir_entry.configure(state="normal" if (not is_buzz and not app_busy) else "disabled")
+        self.pick_project_dir_button.configure(state="normal" if (not is_buzz and not app_busy) else "disabled")
         if hasattr(self, "pick_game_exe_button"):
-            self.pick_game_exe_button.configure(state="normal" if not game_busy else "disabled")
+            self.pick_game_exe_button.configure(state="normal" if not app_busy else "disabled")
         if hasattr(self, "finish_open_button"):
-            self.finish_open_button.configure(state="normal" if not game_busy else "disabled")
+            self.finish_open_button.configure(state="normal" if not app_busy else "disabled")
         if hasattr(self, "finish_restart_button"):
-            self.finish_restart_button.configure(state="normal" if not game_busy else "disabled")
-        self.back_button.configure(state="disabled" if game_busy else ("normal" if self.current_step > 0 else "disabled"))
-        self.next_button.configure(state="disabled" if game_busy else "normal")
+            self.finish_restart_button.configure(state="normal" if not app_busy else "disabled")
+        self.back_button.configure(state="disabled" if app_busy else ("normal" if self.current_step > 0 else "disabled"))
+        next_state = "disabled" if app_busy else "normal"
+        if is_buzz and self.current_step == 1:
+            next_state = "disabled"
+        self.next_button.configure(state=next_state)
+        self._refresh_buzz_output_dir_ui_state()
+        if is_buzz and not app_busy:
+            buzz_video_ready = bool(self.buzz_video_var.get().strip())
+            self.run_buzz_button.configure(state="normal" if buzz_video_ready else "disabled")
 
         if not is_renpy:
             if self.current_step == 1:
@@ -1155,6 +1692,9 @@ class TranslatorWizardApp:
 
     def _game_running(self) -> bool:
         return processo_ativo(self.game_process)
+
+    def _buzz_running(self) -> bool:
+        return self.buzz_process is not None and self.buzz_process.poll() is None
 
     def _start_game_process(self, *, exe_path: Path, mode: str, started_message: str) -> bool:
         project = self._project_path_if_valid()
@@ -1511,6 +2051,8 @@ class TranslatorWizardApp:
             "Etapa 4/5 - TXT traduzido",
             "Etapa 5/5 - Importação",
         ]
+        if normalize_engine(self.engine_var.get()) == ENGINE_BUZZ:
+            titles[1] = "Etapa 2/5 - Buzz (legendas)"
         self.status_var.set(f"{titles[self.current_step]} | Engine: {self._engine_label()}")
         self.step_progress.configure(value=self.current_step + 1)
         self.back_button.configure(state="normal" if self.current_step > 0 else "disabled")
@@ -1543,6 +2085,9 @@ class TranslatorWizardApp:
         if self._game_running():
             self._set_message("Feche o jogo em execução para continuar.")
             return
+        if self._buzz_running():
+            self._set_message("Aguarde a execução atual do Buzz terminar para continuar.")
+            return
         if self.current_step == 1:
             self._cleanup_unren_temp_file(notify=False)
         self._show_step(self.current_step - 1)
@@ -1551,10 +2096,16 @@ class TranslatorWizardApp:
         if self._game_running():
             self._set_message("Feche o jogo em execução para continuar.")
             return
+        if self._buzz_running():
+            self._set_message("Aguarde a execução atual do Buzz terminar para continuar.")
+            return
         if self.current_step == 0:
             self._show_step(1)
             return
         if self.current_step == 1:
+            if normalize_engine(self.engine_var.get()) == ENGINE_BUZZ:
+                self._set_message("No modo Buzz, use a etapa 2 para gerar legendas de vídeo/áudio.")
+                return
             if not self._validate_project_dir():
                 return
             self._cleanup_unren_temp_file(notify=True)
@@ -1577,6 +2128,12 @@ class TranslatorWizardApp:
             messagebox.showwarning(
                 "Jogo em execução",
                 "Feche o jogo aberto na preparação Ren'Py antes de finalizar.",
+            )
+            return
+        if self._buzz_running():
+            messagebox.showwarning(
+                "Buzz em execução",
+                "Aguarde o Buzz finalizar antes de encerrar o app.",
             )
             return
         self._cleanup_unren_temp_file(notify=False)
@@ -1603,6 +2160,12 @@ class TranslatorWizardApp:
         self._refresh_unity_table_list_ui()
         self.unity_tables_info_var.set("Tables Unity: detectar para escolher o idioma/table.")
         self.unity_selected_table_var.set("Table selecionada: (nenhuma)")
+        self.buzz_video_var.set("")
+        self.buzz_process = None
+        self.buzz_running_config = None
+        self.buzz_running_stdout = ""
+        self.buzz_running_stderr = ""
+        self._refresh_buzz_status_label()
         self._refresh_game_exe_info()
         self._show_step(0)
         self._set_message("Fluxo finalizado. Escolha a engine para iniciar um novo projeto.")
@@ -1612,6 +2175,12 @@ class TranslatorWizardApp:
             messagebox.showwarning(
                 "Jogo em execução",
                 "Feche o jogo aberto na preparação Ren'Py antes de finalizar.",
+            )
+            return
+        if self._buzz_running():
+            messagebox.showwarning(
+                "Buzz em execução",
+                "Aguarde o Buzz finalizar antes de encerrar o app.",
             )
             return
         if not self._validate_project_dir():
@@ -1648,6 +2217,12 @@ class TranslatorWizardApp:
                 "Feche o jogo aberto na preparação Ren'Py antes de finalizar.",
             )
             return
+        if self._buzz_running():
+            messagebox.showwarning(
+                "Buzz em execução",
+                "Aguarde o Buzz finalizar antes de reiniciar o fluxo.",
+            )
+            return
         self._reset_wizard_to_start()
 
     def _on_window_close(self) -> None:
@@ -1657,12 +2232,21 @@ class TranslatorWizardApp:
                 "Feche o jogo aberto na preparação Ren'Py antes de sair.",
             )
             return
+        if self._buzz_running():
+            messagebox.showwarning(
+                "Buzz em execução",
+                "Aguarde o Buzz finalizar antes de sair.",
+            )
+            return
         self._cleanup_unren_temp_file(notify=False)
         self.root.destroy()
 
     def _on_engine_change(self) -> None:
         if self._game_running():
             self._set_message("Feche o jogo em execução antes de trocar a engine.")
+            return
+        if self._buzz_running():
+            self._set_message("Aguarde o Buzz finalizar antes de trocar a engine.")
             return
         engine = normalize_engine(self.engine_var.get())
         self.engine_var.set(engine)
@@ -1697,6 +2281,9 @@ class TranslatorWizardApp:
         if self._game_running():
             self._set_message("Feche o jogo em execução antes de trocar a pasta do projeto.")
             return
+        if self._buzz_running():
+            self._set_message("Aguarde o Buzz finalizar antes de trocar a pasta do projeto.")
+            return
         selected = filedialog.askdirectory(title="Selecione a pasta do projeto")
         if selected:
             self.project_dir_var.set(selected)
@@ -1721,6 +2308,9 @@ class TranslatorWizardApp:
         if self._game_running():
             self._set_message("Feche o jogo em execução antes de usar arrastar e soltar.")
             return
+        if self._buzz_running():
+            self._set_message("Aguarde o Buzz finalizar antes de usar arrastar e soltar.")
+            return
         try:
             items = self.root.tk.splitlist(event.data)
             paths = normalize_dropped_items(list(items))
@@ -1729,13 +2319,22 @@ class TranslatorWizardApp:
                 return
 
             if self.drop_mode == DROP_PROJECT_DIR:
+                engine = normalize_engine(self.engine_var.get())
+                if engine == ENGINE_BUZZ:
+                    media_path = resolve_buzz_media_drop_path(paths)
+                    if media_path is None:
+                        self._set_message("No modo Buzz, solte um arquivo de vídeo/áudio válido.")
+                        return
+                    self.buzz_video_var.set(str(media_path))
+                    self._set_message(f"Mídia selecionada via drop para Buzz: {media_path.name}")
+                    return
+
                 selected_dir, used_file_parent = resolve_project_drop_path(paths)
                 if selected_dir is None:
                     self._set_message("Não foi possível identificar uma pasta válida no item arrastado.")
                     return
                 self.project_dir_var.set(str(selected_dir))
                 self._refresh_game_exe_info()
-                engine = normalize_engine(self.engine_var.get())
                 if engine == ENGINE_RENPY:
                     self._detect_renpy_version()
                 else:

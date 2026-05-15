@@ -79,8 +79,9 @@ Se a tradução local falhar (serviço offline, timeout, cancelamento), o app ma
 
 Também na etapa 3 há opções para dividir/juntar TXT grande:
 - **Dividir TXT gerado**: cria `parte_00.txt`, `parte_01.txt`, ... em `Downloads`.
-- **Juntar partes traduzidas**: lê `parte_*.txt` (incluindo variantes como `parte_00.en.pt.txt`), junta em ordem e sobrescreve o TXT da engine no workspace (`all_translations.txt`, `rpgm_translations.txt` ou `unity_translations.txt`).
-- Após juntar com sucesso, as partes usadas são removidas automaticamente.
+- Na divisão, o app também grava `parte_manifest.json` para validar segurança da junção.
+- **Juntar partes traduzidas**: lê `parte_*.txt` (incluindo variantes como `parte_00.en.pt.txt`), valida manifesto/ordem/partes faltantes e sobrescreve o TXT da engine no workspace (`all_translations.txt`, `rpgm_translations.txt` ou `unity_translations.txt`).
+- Por padrão, após juntar com sucesso, as partes usadas são removidas automaticamente. Você pode marcar **Manter partes após juntar** para preservar os arquivos.
 
 ## Buzz Automático (legendas)
 

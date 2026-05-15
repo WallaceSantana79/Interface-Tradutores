@@ -45,13 +45,9 @@ echo "Gerando executavel onedir com PyInstaller ..."
 python -m PyInstaller \
   --noconfirm \
   --clean \
-  --windowed \
-  --name InterfaceTradutores \
-  --collect-all tkinterdnd2 \
-  --collect-all UnityPy \
   --distpath "${PROJECT_ROOT}/dist" \
   --workpath "${PROJECT_ROOT}/build" \
-  "${PROJECT_ROOT}/app.py"
+  "${PROJECT_ROOT}/InterfaceTradutores.spec"
 
 BIN_PATH="${PROJECT_ROOT}/dist/InterfaceTradutores/InterfaceTradutores"
 if [[ ! -f "${BIN_PATH}" ]]; then

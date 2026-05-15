@@ -27,7 +27,7 @@ from translator_core.local_translate import (
     local_translated_path,
     translate_document_local,
 )
-from translator_core.text_parts import merge_parts_into_target, split_text_file
+from translator_core.text_parts import MANIFEST_FILENAME, merge_parts_into_target, split_text_file
 from translator_core.orchestrator import (
     ENGINE_BUZZ,
     ENGINE_RENPY,
@@ -425,6 +425,7 @@ class TranslatorWizardApp:
         self.local_translation_timeout_var = tk.StringVar(value=self.settings["local_translation_timeout_seconds"])
         self.local_translation_chunk_var = tk.StringVar(value=self.settings["local_translation_chunk_lines"])
         self.split_parts_var = tk.StringVar(value="4")
+        self.keep_parts_after_merge_var = tk.BooleanVar(value=False)
         self.ollama_status_var = tk.StringVar(value="Ollama: verificando...")
         self.ollama_models: list[str] = []
         self.buzz_output_srt_var = tk.BooleanVar(value=False)
@@ -1043,9 +1044,17 @@ class TranslatorWizardApp:
             split_row, text="Juntar partes traduzidas", command=self._join_split_parts
         )
         self.join_parts_button.pack(side="left")
+        ttk.Checkbutton(
+            frame,
+            text="Manter partes após juntar",
+            variable=self.keep_parts_after_merge_var,
+        ).pack(anchor="w", pady=(8, 0))
         ttk.Label(
             frame,
-            text=f"As partes ficam em {DOWNLOADS_DIR}. O merge substitui o TXT no workspace da engine.",
+            text=(
+                f"As partes ficam em {DOWNLOADS_DIR}. O merge substitui o TXT no workspace da engine "
+                f"e valida o manifesto {MANIFEST_FILENAME}."
+            ),
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(8, 0))
         self.split_generated_button.configure(state="disabled")
@@ -3219,7 +3228,13 @@ class TranslatorWizardApp:
             return
 
         try:
-            created_files = split_text_file(self.generated_translation_path, DOWNLOADS_DIR, parts_count)
+            created_files = split_text_file(
+                self.generated_translation_path,
+                DOWNLOADS_DIR,
+                parts_count,
+                engine=normalize_engine(self.engine_var.get()),
+                target_path=self.generated_translation_path,
+            )
         except ValueError as exc:
             messagebox.showwarning("Divisão inválida", str(exc))
             self._set_message(f"Divisão cancelada: {exc}")
@@ -3228,35 +3243,54 @@ class TranslatorWizardApp:
         self._set_message(f"TXT dividido em {len(created_files)} partes em {DOWNLOADS_DIR}.")
         messagebox.showinfo(
             "Divisão concluída",
-            f"Foram geradas {len(created_files)} partes em:\n{DOWNLOADS_DIR}",
+            (
+                f"Foram geradas {len(created_files)} partes em:\n{DOWNLOADS_DIR}\n\n"
+                f"Manifesto criado: {DOWNLOADS_DIR / MANIFEST_FILENAME}"
+            ),
         )
 
     def _join_split_parts(self) -> None:
         if not self.generated_translation_path:
             self._set_message("Execute a exportação antes de juntar as partes.")
             return
+        cleanup_enabled = not self.keep_parts_after_merge_var.get()
         try:
             ordered_parts, removed = merge_parts_into_target(
-                DOWNLOADS_DIR, self.generated_translation_path, cleanup=True
+                DOWNLOADS_DIR,
+                self.generated_translation_path,
+                cleanup=cleanup_enabled,
+                require_manifest=True,
             )
         except FileNotFoundError:
             messagebox.showwarning(
-                "Nenhuma parte encontrada",
-                f"Nenhum arquivo parte_*.txt foi encontrado em:\n{DOWNLOADS_DIR}",
+                "Arquivos de partes não encontrados",
+                (
+                    f"Não encontrei partes válidas em:\n{DOWNLOADS_DIR}\n\n"
+                    f"Ou o manifesto {MANIFEST_FILENAME} está ausente."
+                ),
             )
             self._set_message("Junção cancelada: nenhuma parte encontrada em Downloads.")
+            return
+        except (ValueError, PermissionError, OSError) as exc:
+            messagebox.showerror("Falha ao juntar partes", str(exc))
+            self._set_message(f"Junção cancelada: {exc}")
             return
 
         target_path = self.generated_translation_path
         self.translated_file_var.set(str(target_path))
+        cleanup_text = (
+            f"{removed} parte(s) removida(s) de {DOWNLOADS_DIR}."
+            if cleanup_enabled
+            else "As partes foram mantidas conforme solicitado."
+        )
         self._set_message(
-            f"Partes unidas em {target_path}. {removed} parte(s) removida(s) de {DOWNLOADS_DIR}."
+            f"Partes unidas em {target_path}. {cleanup_text}"
         )
         messagebox.showinfo(
             "Junção concluída",
             (
                 f"Arquivo final sobrescrito em:\n{target_path}\n\n"
-                f"Partes removidas: {removed}/{len(ordered_parts)}"
+                f"{cleanup_text}"
             ),
         )
 

@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 workspace/
 .tmp_tests/
+.tmp_bench/
 .venv-build/
 build/
 dist/

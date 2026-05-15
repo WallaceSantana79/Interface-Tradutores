@@ -46,18 +46,11 @@ Invoke-Step -Label "Gerando executável onedir com PyInstaller ..." -CmdArgs @(
     "PyInstaller",
     "--noconfirm",
     "--clean",
-    "--windowed",
-    "--name",
-    "InterfaceTradutores",
-    "--collect-all",
-    "tkinterdnd2",
-    "--collect-all",
-    "UnityPy",
     "--distpath",
     (Join-Path $projectRoot "dist"),
     "--workpath",
     (Join-Path $projectRoot "build"),
-    (Join-Path $projectRoot "app.py")
+    (Join-Path $projectRoot "InterfaceTradutores.spec")
 )
 
 $exePath = Join-Path $projectRoot "dist\InterfaceTradutores\InterfaceTradutores.exe"

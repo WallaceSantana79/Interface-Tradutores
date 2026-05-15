@@ -1,18 +1,33 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import tkinter as tk
+import urllib.error
+import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from translator_core import exportar, importar, pre_validar_importacao
+from translator_core.models import JobResult
+from translator_core.local_translate import (
+    DEFAULT_CHUNK_LINES,
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_TOTAL_TIMEOUT_SECONDS,
+    LocalTranslateConfig,
+    local_translated_path,
+    translate_document_local,
+)
+from translator_core.text_parts import merge_parts_into_target, split_text_file
 from translator_core.orchestrator import (
     ENGINE_BUZZ,
     ENGINE_RENPY,
@@ -30,6 +45,7 @@ from translator_core.buzz_prepare import (
     BUZZ_TASKS,
     BuzzRunConfig,
     detectar_buzz,
+    executar_buzz,
     finalizar_execucao_buzz,
     iniciar_execucao_buzz,
 )
@@ -158,6 +174,7 @@ def resolve_workspace_root(*, frozen: bool | None = None) -> Path:
 
 WORKSPACE_ROOT = resolve_workspace_root()
 WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+DOWNLOADS_DIR = Path.home() / "Downloads"
 
 
 def open_in_os(path: str | Path) -> None:
@@ -274,6 +291,9 @@ def _default_settings() -> dict[str, Any]:
         "buzz_output_formats": ["srt"],
         "buzz_output_same_dir": True,
         "buzz_output_directory": "",
+        "local_translation_model": DEFAULT_MODEL,
+        "local_translation_timeout_seconds": str(DEFAULT_TOTAL_TIMEOUT_SECONDS),
+        "local_translation_chunk_lines": str(DEFAULT_CHUNK_LINES),
     }
 
 
@@ -299,6 +319,9 @@ def load_app_settings() -> dict[str, Any]:
         "buzz_task",
         "buzz_language",
         "buzz_output_directory",
+        "local_translation_model",
+        "local_translation_timeout_seconds",
+        "local_translation_chunk_lines",
     ]:
         value = loaded.get(key)
         if isinstance(value, str):
@@ -398,6 +421,12 @@ class TranslatorWizardApp:
         self.buzz_extract_speech_var = tk.BooleanVar(value=bool(self.settings["buzz_extract_speech"]))
         self.buzz_output_same_dir_var = tk.BooleanVar(value=bool(self.settings["buzz_output_same_dir"]))
         self.buzz_output_dir_var = tk.StringVar(value=self.settings["buzz_output_directory"])
+        self.local_translation_model_var = tk.StringVar(value=self.settings["local_translation_model"])
+        self.local_translation_timeout_var = tk.StringVar(value=self.settings["local_translation_timeout_seconds"])
+        self.local_translation_chunk_var = tk.StringVar(value=self.settings["local_translation_chunk_lines"])
+        self.split_parts_var = tk.StringVar(value="4")
+        self.ollama_status_var = tk.StringVar(value="Ollama: verificando...")
+        self.ollama_models: list[str] = []
         self.buzz_output_srt_var = tk.BooleanVar(value=False)
         self.buzz_output_vtt_var = tk.BooleanVar(value=False)
         self.buzz_output_txt_var = tk.BooleanVar(value=False)
@@ -423,6 +452,10 @@ class TranslatorWizardApp:
         self.buzz_running_config: BuzzRunConfig | None = None
         self.buzz_running_stdout: str = ""
         self.buzz_running_stderr: str = ""
+        self.translation_thread: threading.Thread | None = None
+        self.translation_cancel_event: threading.Event | None = None
+        self.translation_result_queue: queue.Queue[JobResult | Exception] | None = None
+        self.translation_on_done: Any = None
         self.buzz_video_var.trace_add("write", lambda *_args: self._refresh_renpy_prepare_ui_state())
 
         self._build_layout()
@@ -430,6 +463,7 @@ class TranslatorWizardApp:
         self._apply_buzz_output_vars_from_settings()
         self._refresh_renpy_settings_labels()
         self._refresh_buzz_status_label()
+        self._refresh_ollama_status_and_models()
         self._update_engine_display()
         self._refresh_game_exe_info()
         self._show_step(0)
@@ -897,6 +931,12 @@ class TranslatorWizardApp:
             command=self._confirm_and_run_buzz,
         )
         self.run_buzz_button.pack(side="left")
+        self.run_translate_buzz_button = ttk.Button(
+            buzz_action_row,
+            text="Gerar e traduzir legenda",
+            command=self._run_buzz_and_auto_translate,
+        )
+        self.run_translate_buzz_button.pack(side="left", padx=(8, 0))
 
         self.buzz_hint_label = ttk.Label(
             self.buzz_prepare_frame,
@@ -924,6 +964,7 @@ class TranslatorWizardApp:
             self.pick_buzz_output_dir_button,
             self.refresh_buzz_status_button,
             self.run_buzz_button,
+            self.run_translate_buzz_button,
         ]
         return frame
 
@@ -935,6 +976,41 @@ class TranslatorWizardApp:
         self.workspace_label.pack(anchor="w", pady=(0, 8))
 
         ttk.Button(frame, text="Executar exportação", command=self._run_export).pack(anchor="w")
+        self.auto_translate_import_button = ttk.Button(
+            frame,
+            text="Exportar + traduzir + importar automaticamente",
+            command=self._run_auto_export_translate_import,
+        )
+        self.auto_translate_import_button.pack(anchor="w", pady=(8, 0))
+        local_row = ttk.Frame(frame)
+        local_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(local_row, textvariable=self.ollama_status_var, style="Hint.TLabel").pack(side="left", padx=(0, 10))
+        self.refresh_ollama_button = ttk.Button(
+            local_row,
+            text="Atualizar Ollama",
+            command=self._refresh_ollama_status_and_models,
+        )
+        self.refresh_ollama_button.pack(side="left", padx=(0, 12))
+        ttk.Label(local_row, text="Modelo Ollama:").pack(side="left")
+        self.local_model_combo = ttk.Combobox(
+            local_row,
+            textvariable=self.local_translation_model_var,
+            state="normal",
+            width=28,
+        )
+        self.local_model_combo.pack(side="left", padx=(6, 10))
+        self.local_model_combo.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+        ttk.Label(local_row, text="Timeout total (s):").pack(side="left")
+        ttk.Entry(local_row, textvariable=self.local_translation_timeout_var, width=8).pack(side="left", padx=(6, 10))
+        ttk.Label(local_row, text="Chunk (linhas):").pack(side="left")
+        ttk.Entry(local_row, textvariable=self.local_translation_chunk_var, width=6).pack(side="left", padx=(6, 0))
+        self.cancel_translation_button = ttk.Button(
+            frame,
+            text="Cancelar tradução local em andamento",
+            command=self._cancel_local_translation,
+        )
+        self.cancel_translation_button.pack(anchor="w", pady=(8, 0))
+        self.cancel_translation_button.configure(state="disabled")
 
         file_row = ttk.Frame(frame)
         file_row.pack(fill="x", pady=(14, 0))
@@ -953,6 +1029,27 @@ class TranslatorWizardApp:
         )
         self.open_generated_folder_button.pack(anchor="w", pady=(8, 0))
         self.open_generated_folder_button.configure(state="disabled")
+
+        ttk.Separator(frame).pack(fill="x", pady=(14, 10))
+        split_row = ttk.Frame(frame)
+        split_row.pack(fill="x")
+        ttk.Label(split_row, text="Dividir em partes:").pack(side="left")
+        ttk.Entry(split_row, textvariable=self.split_parts_var, width=6).pack(side="left", padx=(8, 10))
+        self.split_generated_button = ttk.Button(
+            split_row, text="Dividir TXT gerado", command=self._split_generated_txt
+        )
+        self.split_generated_button.pack(side="left", padx=(0, 8))
+        self.join_parts_button = ttk.Button(
+            split_row, text="Juntar partes traduzidas", command=self._join_split_parts
+        )
+        self.join_parts_button.pack(side="left")
+        ttk.Label(
+            frame,
+            text=f"As partes ficam em {DOWNLOADS_DIR}. O merge substitui o TXT no workspace da engine.",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(8, 0))
+        self.split_generated_button.configure(state="disabled")
+        self.join_parts_button.configure(state="disabled")
         return frame
 
     def _build_step_translated_txt(self, parent: ttk.Frame) -> ttk.Frame:
@@ -1253,6 +1350,224 @@ class TranslatorWizardApp:
         else:
             self._set_message("Buzz finalizado. Revise a pasta de saída para confirmar os arquivos.")
 
+    def _preferred_buzz_generated_file(self, generated_files: list[str]) -> Path | None:
+        paths = [Path(item) for item in generated_files if item]
+        for suffix in [".srt", ".vtt", ".txt"]:
+            for path in paths:
+                if path.exists() and path.is_file() and path.suffix.lower() == suffix:
+                    return path
+        for path in paths:
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def _translation_running(self) -> bool:
+        return self.translation_thread is not None and self.translation_thread.is_alive()
+
+    def _cancel_local_translation(self) -> None:
+        if self.translation_cancel_event is None or not self._translation_running():
+            self._set_message("Não há tradução local em andamento para cancelar.")
+            return
+        self.translation_cancel_event.set()
+        self._set_message("Cancelamento solicitado para a tradução local. Aguarde finalizar o bloco atual.")
+
+    def _build_local_translate_config(self, input_path: Path, output_dir: Path) -> LocalTranslateConfig:
+        model = self.local_translation_model_var.get().strip() or DEFAULT_MODEL
+        timeout_raw = self.local_translation_timeout_var.get().strip() or str(DEFAULT_TOTAL_TIMEOUT_SECONDS)
+        chunk_raw = self.local_translation_chunk_var.get().strip() or str(DEFAULT_CHUNK_LINES)
+        try:
+            total_timeout = int(timeout_raw)
+            chunk_lines = int(chunk_raw)
+        except ValueError as exc:
+            raise ValueError("Timeout e chunk devem ser números inteiros.") from exc
+        if total_timeout <= 0:
+            raise ValueError("Timeout deve ser maior que zero.")
+        if chunk_lines < 0:
+            raise ValueError("Chunk deve ser zero ou maior.")
+        normalized_chunk = chunk_lines
+        if chunk_lines == 0:
+            normalized_chunk = 10**9
+        self.local_translation_model_var.set(model)
+        self.local_translation_timeout_var.set(str(total_timeout))
+        self.local_translation_chunk_var.set("0" if chunk_lines == 0 else str(chunk_lines))
+        return LocalTranslateConfig(
+            input_path=input_path,
+            output_dir=output_dir,
+            model=model,
+            total_timeout_seconds=total_timeout,
+            chunk_lines=normalized_chunk,
+        )
+
+    def _refresh_ollama_status_and_models(self) -> None:
+        url = f"{DEFAULT_OLLAMA_URL.rstrip('/')}/api/tags"
+        try:
+            request = urllib.request.Request(url=url, method="GET")
+            with urllib.request.urlopen(request, timeout=4) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            models: list[str] = []
+            for item in payload.get("models", []):
+                if isinstance(item, dict):
+                    name = item.get("name")
+                    if isinstance(name, str) and name.strip():
+                        models.append(name.strip())
+            self.ollama_models = sorted(set(models))
+            self.local_model_combo.configure(values=self.ollama_models)
+            current = self.local_translation_model_var.get().strip()
+            if not current and self.ollama_models:
+                self.local_translation_model_var.set(self.ollama_models[0])
+            self.ollama_status_var.set(f"Ollama: online ({len(self.ollama_models)} modelo(s))")
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            self.ollama_models = []
+            self.local_model_combo.configure(values=[])
+            self.ollama_status_var.set("Ollama: offline")
+
+    def _on_local_translation_progress(self, translated_lines: int, total_lines: int) -> None:
+        if not self.root.winfo_exists():
+            return
+        progress = min(100, int((translated_lines / max(1, total_lines)) * 100))
+        self.root.after(
+            0,
+            lambda: self._set_message(
+                f"Tradução local em andamento: {translated_lines}/{total_lines} linhas ({progress}%)."
+            ),
+        )
+
+    def _run_local_translation_async(self, config: LocalTranslateConfig, on_done) -> None:
+        if self._translation_running():
+            messagebox.showwarning("Tradução em andamento", "Já existe uma tradução local em andamento.")
+            return
+
+        self.translation_cancel_event = threading.Event()
+        self.translation_result_queue = queue.Queue(maxsize=1)
+        self.translation_on_done = on_done
+        self.cancel_translation_button.configure(state="normal")
+        runtime_config = LocalTranslateConfig(
+            input_path=config.input_path,
+            output_dir=config.output_dir,
+            model=config.model,
+            ollama_base_url=config.ollama_base_url,
+            request_timeout_seconds=config.request_timeout_seconds,
+            total_timeout_seconds=config.total_timeout_seconds,
+            chunk_lines=config.chunk_lines,
+            cancel_event=self.translation_cancel_event,
+            progress_callback=self._on_local_translation_progress,
+        )
+
+        def worker() -> None:
+            try:
+                result = translate_document_local(runtime_config)
+                self.translation_result_queue.put(result)
+            except Exception as exc:
+                self.translation_result_queue.put(exc)
+
+        self.translation_thread = threading.Thread(target=worker, daemon=True, name="local-translate-worker")
+        self.translation_thread.start()
+        self._refresh_renpy_prepare_ui_state()
+        self.root.after(300, self._poll_local_translation_result)
+
+    def _poll_local_translation_result(self) -> None:
+        if self.translation_result_queue is None:
+            return
+        try:
+            payload = self.translation_result_queue.get_nowait()
+        except queue.Empty:
+            if self._translation_running() and self.root.winfo_exists():
+                self.root.after(300, self._poll_local_translation_result)
+            return
+
+        self.translation_thread = None
+        self.cancel_translation_button.configure(state="disabled")
+        self._refresh_renpy_prepare_ui_state()
+        on_done = self.translation_on_done
+        self.translation_on_done = None
+        self.translation_result_queue = None
+        self.translation_cancel_event = None
+
+        if isinstance(payload, Exception):
+            result = JobResult(False, f"Falha inesperada na tradução local: {payload}")
+        else:
+            result = payload
+        if callable(on_done):
+            on_done(result)
+
+    def _run_buzz_and_auto_translate(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução antes de iniciar o Buzz.")
+            return
+        if self._buzz_running():
+            self._set_message("Já existe uma execução do Buzz em andamento.")
+            return
+        if self._translation_running():
+            self._set_message("Já existe uma tradução local em andamento.")
+            return
+
+        self._normalize_buzz_settings()
+        self._save_settings()
+
+        try:
+            config = self._build_buzz_config_from_ui()
+            detection = detectar_buzz()
+            if not detection.available:
+                raise ValueError(detection.message)
+        except ValueError as exc:
+            messagebox.showerror("Configuração Buzz inválida", str(exc))
+            self._set_message(str(exc))
+            return
+
+        should_run = messagebox.askyesno(
+            "Gerar e traduzir legenda",
+            (
+                "Executar Buzz e depois traduzir localmente (Ollama) a legenda gerada?\n\n"
+                f"Arquivo: {config.input_path}\n"
+                f"Formato(s): {', '.join(config.output_formats)}\n"
+                "Destino da tradução: português"
+            ),
+        )
+        if not should_run:
+            self._set_message("Geração/tradução Buzz cancelada.")
+            return
+
+        self._set_message("Buzz em execução...")
+        self.root.update_idletasks()
+        buzz_result = executar_buzz(config)
+        if not buzz_result.success:
+            messagebox.showerror("Erro no Buzz", buzz_result.message)
+            self._set_message(buzz_result.message)
+            return
+
+        subtitle_path = self._preferred_buzz_generated_file(buzz_result.generated_files)
+        if subtitle_path is None:
+            details = buzz_result.message
+            if buzz_result.warnings:
+                details += "\n\n" + "\n".join(f"- {warning}" for warning in buzz_result.warnings)
+            messagebox.showwarning("Buzz sem arquivo traduzível", details)
+            self._set_message("Buzz terminou, mas não encontrei legenda para enviar ao tradutor.")
+            return
+
+        self._set_message(f"Buzz concluído. Iniciando tradução local de {subtitle_path.name}...")
+        self.root.update_idletasks()
+        try:
+            config_translate = self._build_local_translate_config(subtitle_path, subtitle_path.parent)
+        except ValueError as exc:
+            messagebox.showerror("Configuração de tradução inválida", str(exc))
+            self._set_message(str(exc))
+            return
+
+        def on_done(translate_result: JobResult) -> None:
+            if not translate_result.success:
+                messagebox.showerror("Tradução local falhou", translate_result.message)
+                self._set_message(
+                    f"Buzz gerou {subtitle_path.name}, mas a tradução local falhou. Use o arquivo manualmente."
+                )
+                return
+            details = translate_result.message
+            if translate_result.generated_files:
+                details += "\n\nArquivo traduzido:\n" + "\n".join(f"- {path}" for path in translate_result.generated_files)
+            messagebox.showinfo("Legenda traduzida", details)
+            self._set_message("Legenda gerada e traduzida localmente com sucesso.")
+
+        self._run_local_translation_async(config_translate, on_done)
+
     def _get_game_exe_map(self) -> dict[str, str]:
         raw = self.settings.get("game_exe_by_project")
         if not isinstance(raw, dict):
@@ -1340,6 +1655,9 @@ class TranslatorWizardApp:
         self.settings["buzz_output_same_dir"] = bool(self.buzz_output_same_dir_var.get())
         self.settings["buzz_output_directory"] = self.buzz_output_dir_var.get().strip()
         self.settings["buzz_output_formats"] = self._selected_buzz_output_formats()
+        self.settings["local_translation_model"] = self.local_translation_model_var.get().strip() or DEFAULT_MODEL
+        self.settings["local_translation_timeout_seconds"] = self.local_translation_timeout_var.get().strip()
+        self.settings["local_translation_chunk_lines"] = self.local_translation_chunk_var.get().strip()
         self.settings["game_exe_by_project"] = self._get_game_exe_map()
         self.settings["unity_table_selection_by_project"] = self._get_unity_table_selection_map()
         save_app_settings(self.settings)
@@ -1353,7 +1671,8 @@ class TranslatorWizardApp:
         is_buzz = engine == ENGINE_BUZZ
         game_busy = self._game_running()
         buzz_busy = self._buzz_running()
-        app_busy = game_busy or buzz_busy
+        translation_busy = self._translation_running()
+        app_busy = game_busy or buzz_busy or translation_busy
         self._refresh_wine_status_label()
 
         if self.current_step == 1 and is_buzz:
@@ -1417,6 +1736,11 @@ class TranslatorWizardApp:
         if is_buzz and not app_busy:
             buzz_video_ready = bool(self.buzz_video_var.get().strip())
             self.run_buzz_button.configure(state="normal" if buzz_video_ready else "disabled")
+            self.run_translate_buzz_button.configure(state="normal" if buzz_video_ready else "disabled")
+        if hasattr(self, "auto_translate_import_button"):
+            self.auto_translate_import_button.configure(state="disabled" if app_busy else "normal")
+        if hasattr(self, "cancel_translation_button"):
+            self.cancel_translation_button.configure(state="normal" if translation_busy else "disabled")
 
         if not is_renpy:
             if self.current_step == 1:
@@ -2099,6 +2423,9 @@ class TranslatorWizardApp:
         if self._buzz_running():
             self._set_message("Aguarde a execução atual do Buzz terminar para continuar.")
             return
+        if self._translation_running():
+            self._set_message("Aguarde a tradução local terminar para continuar.")
+            return
         if self.current_step == 0:
             self._show_step(1)
             return
@@ -2136,6 +2463,12 @@ class TranslatorWizardApp:
                 "Aguarde o Buzz finalizar antes de encerrar o app.",
             )
             return
+        if self._translation_running():
+            messagebox.showwarning(
+                "Tradução em execução",
+                "Aguarde a tradução local finalizar ou cancele antes de encerrar o app.",
+            )
+            return
         self._cleanup_unren_temp_file(notify=False)
         self.root.destroy()
 
@@ -2151,6 +2484,7 @@ class TranslatorWizardApp:
         self.generated_txt_label.configure(text="-")
         self.open_generated_button.configure(state="disabled")
         self.open_generated_folder_button.configure(state="disabled")
+        self._set_split_join_buttons_state(False)
         self.open_log_button.configure(state="disabled")
         self.detected_renpy_version = None
         self.renpy_version_var.set("Versão Ren'Py detectada: -")
@@ -2238,6 +2572,12 @@ class TranslatorWizardApp:
                 "Aguarde o Buzz finalizar antes de sair.",
             )
             return
+        if self._translation_running():
+            messagebox.showwarning(
+                "Tradução em execução",
+                "Aguarde a tradução local finalizar ou cancele antes de sair.",
+            )
+            return
         self._cleanup_unren_temp_file(notify=False)
         self.root.destroy()
 
@@ -2256,6 +2596,7 @@ class TranslatorWizardApp:
         self.generated_txt_label.configure(text="-")
         self.open_generated_button.configure(state="disabled")
         self.open_generated_folder_button.configure(state="disabled")
+        self._set_split_join_buttons_state(False)
         self.translated_file_var.set("")
         self.detected_renpy_version = None
         self.renpy_version_var.set("Versão Ren'Py detectada: -")
@@ -2746,12 +3087,91 @@ class TranslatorWizardApp:
         self.export_done = True
         self.open_generated_button.configure(state="normal")
         self.open_generated_folder_button.configure(state="normal")
+        self._set_split_join_buttons_state(True)
 
         details = result.message
         if result.warnings:
             details += "\n\n" + "\n".join(f"- {w}" for w in result.warnings)
         messagebox.showinfo("Exportação concluída", details)
         self._set_message(f"{result.message} Agora traduza e selecione o TXT final.")
+
+    def _run_auto_export_translate_import(self) -> None:
+        if not self._validate_project_dir():
+            return
+        if self._translation_running():
+            self._set_message("Aguarde a tradução local em andamento antes de iniciar outro fluxo automático.")
+            return
+
+        engine = self.engine_var.get()
+        if normalize_engine(engine) == ENGINE_BUZZ:
+            self._set_message("No modo Buzz, use 'Gerar e traduzir legenda' na etapa 2.")
+            return
+
+        should_run = messagebox.askyesno(
+            "Tradução automática",
+            (
+                "Exportar, traduzir localmente com Ollama e importar automaticamente?\n\n"
+                "Se a tradução falhar, o TXT exportado ficará pronto para o fluxo manual."
+            ),
+        )
+        if not should_run:
+            self._set_message("Tradução automática cancelada.")
+            return
+
+        if normalize_engine(engine) == ENGINE_UNITY:
+            self._auto_apply_unity_table_highlight()
+
+        self._set_message("Exportando textos...")
+        self.root.update_idletasks()
+        export_result = exportar(engine, self.project_dir_var.get(), WORKSPACE_ROOT)
+        if not export_result.success:
+            messagebox.showerror("Erro na exportação", export_result.message)
+            self._set_message(export_result.message)
+            return
+
+        engine_ws = engine_workspace_dir(engine, WORKSPACE_ROOT)
+        txt_name = translation_filename_for_engine(engine)
+        self.generated_translation_path = engine_ws / txt_name
+        self.generated_txt_label.configure(text=str(self.generated_translation_path))
+        self.translated_file_var.set(str(self.generated_translation_path))
+        self.export_done = True
+        self.open_generated_button.configure(state="normal")
+        self.open_generated_folder_button.configure(state="normal")
+        self._set_split_join_buttons_state(True)
+
+        translated_output = local_translated_path(self.generated_translation_path, engine_ws)
+        self._set_message(f"Iniciando tradução local: {self.generated_translation_path.name}")
+        try:
+            config_translate = self._build_local_translate_config(self.generated_translation_path, engine_ws)
+        except ValueError as exc:
+            messagebox.showerror("Configuração de tradução inválida", str(exc))
+            self._set_message(str(exc))
+            return
+
+        def on_done(translate_result: JobResult) -> None:
+            if not translate_result.success:
+                details = (
+                    f"{export_result.message}\n\n"
+                    f"{translate_result.message}\n\n"
+                    f"TXT exportado mantido para tradução manual:\n{self.generated_translation_path}"
+                )
+                messagebox.showerror("Tradução automática falhou", details)
+                self._set_message(
+                    "Exportação concluída, mas a tradução local falhou. Use o fluxo manual com o TXT exportado."
+                )
+                return
+
+            generated = (
+                translate_result.generated_files[0]
+                if translate_result.generated_files
+                else str(translated_output)
+            )
+            self.translated_file_var.set(generated)
+            self._set_message("Tradução local concluída. Validando importação...")
+            self.root.update_idletasks()
+            self._run_import_for_selected_file(auto_mode=True)
+
+        self._run_local_translation_async(config_translate, on_done)
 
     def _open_generated_txt(self) -> None:
         if not self.generated_translation_path:
@@ -2769,7 +3189,81 @@ class TranslatorWizardApp:
         except Exception as exc:
             messagebox.showerror("Erro ao abrir pasta", str(exc))
 
+    def _set_split_join_buttons_state(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "split_generated_button"):
+            self.split_generated_button.configure(state=state)
+        if hasattr(self, "join_parts_button"):
+            self.join_parts_button.configure(state=state)
+
+    def _read_split_parts_count(self) -> int:
+        raw = self.split_parts_var.get().strip()
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError("Informe uma quantidade de partes válida (número inteiro >= 2).") from exc
+        if value < 2:
+            raise ValueError("A divisão precisa ter pelo menos 2 partes.")
+        self.split_parts_var.set(str(value))
+        return value
+
+    def _split_generated_txt(self) -> None:
+        if not self.generated_translation_path or not self.generated_translation_path.exists():
+            self._set_message("Execute a exportação antes de dividir o TXT gerado.")
+            return
+        try:
+            parts_count = self._read_split_parts_count()
+        except ValueError as exc:
+            messagebox.showerror("Divisão inválida", str(exc))
+            self._set_message(str(exc))
+            return
+
+        try:
+            created_files = split_text_file(self.generated_translation_path, DOWNLOADS_DIR, parts_count)
+        except ValueError as exc:
+            messagebox.showwarning("Divisão inválida", str(exc))
+            self._set_message(f"Divisão cancelada: {exc}")
+            return
+
+        self._set_message(f"TXT dividido em {len(created_files)} partes em {DOWNLOADS_DIR}.")
+        messagebox.showinfo(
+            "Divisão concluída",
+            f"Foram geradas {len(created_files)} partes em:\n{DOWNLOADS_DIR}",
+        )
+
+    def _join_split_parts(self) -> None:
+        if not self.generated_translation_path:
+            self._set_message("Execute a exportação antes de juntar as partes.")
+            return
+        try:
+            ordered_parts, removed = merge_parts_into_target(
+                DOWNLOADS_DIR, self.generated_translation_path, cleanup=True
+            )
+        except FileNotFoundError:
+            messagebox.showwarning(
+                "Nenhuma parte encontrada",
+                f"Nenhum arquivo parte_*.txt foi encontrado em:\n{DOWNLOADS_DIR}",
+            )
+            self._set_message("Junção cancelada: nenhuma parte encontrada em Downloads.")
+            return
+
+        target_path = self.generated_translation_path
+        self.translated_file_var.set(str(target_path))
+        self._set_message(
+            f"Partes unidas em {target_path}. {removed} parte(s) removida(s) de {DOWNLOADS_DIR}."
+        )
+        messagebox.showinfo(
+            "Junção concluída",
+            (
+                f"Arquivo final sobrescrito em:\n{target_path}\n\n"
+                f"Partes removidas: {removed}/{len(ordered_parts)}"
+            ),
+        )
+
     def _run_import(self) -> None:
+        self._run_import_for_selected_file(auto_mode=False)
+
+    def _run_import_for_selected_file(self, *, auto_mode: bool) -> None:
         if not self._validate_project_dir() or not self._validate_translated_file():
             return
 
@@ -2789,7 +3283,8 @@ class TranslatorWizardApp:
 
         if pre.warnings:
             if not self._confirm_import_with_warnings(pre.warnings):
-                self._set_message("Importação cancelada para revisão dos alertas.")
+                prefix = "Tradução automática concluída, mas " if auto_mode else ""
+                self._set_message(f"{prefix}Importação cancelada para revisão dos alertas.")
                 return
 
         criar_backup = messagebox.askyesno(
@@ -2829,7 +3324,10 @@ class TranslatorWizardApp:
             extra_notes=extra_notes,
             warnings=result.warnings,
         )
-        self._set_message(result.message)
+        if auto_mode:
+            self._set_message(f"Fluxo automático concluído. {result.message}")
+        else:
+            self._set_message(result.message)
 
     def _open_log(self) -> None:
         if not self.last_log_file:
@@ -2846,3 +3344,5 @@ class TranslatorWizardApp:
 if __name__ == "__main__":
     app = TranslatorWizardApp()
     app.run()
+
+

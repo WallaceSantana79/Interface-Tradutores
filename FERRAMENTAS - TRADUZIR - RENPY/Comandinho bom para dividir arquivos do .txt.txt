@@ -1,0 +1,6 @@
+Separa por um regex: csplit -z -f "parte_" all_translations.txt "/=== ARQUIVO_/" "{*}" --suffix-format='%02d.txt'
+Junta tudo nesse arquivo: cat parte_*.en.pt.txt > traducao_completa.txt
+
+Separa em tamanho mantendo linha: split -n l/4 -d all_translations.txt parte_
+Depois não sei só faça: for f in parte_[0-9]*; do mv "$f" "$f.txt"; done
+Junta tudo nesse arquivo: cat parte_*.en.pt.txt > traducao_completa.txt

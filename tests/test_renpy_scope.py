@@ -81,6 +81,27 @@ class RenpyScopeTests(unittest.TestCase):
         self.assertIn('"Oi A"', file_a.read_text(encoding="utf-8-sig"))
         self.assertIn('"Oi B"', file_b.read_text(encoding="utf-8-sig"))
 
+    def test_export_includes_common_options_and_screens_rpy(self) -> None:
+        project = self.root / "game_special_files"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+
+        for file_name, marker in [
+            ("common.rpy", "COMMON OK"),
+            ("options.rpy", "OPTIONS OK"),
+            ("screens.rpy", "SCREENS OK"),
+        ]:
+            (tl_dir / file_name).write_text(f'# "{marker}"\ne "{marker}"\n', encoding="utf-8-sig")
+
+        export_result = exportar("renpy", project, self.workspace)
+        self.assertTrue(export_result.success, export_result.message)
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        content = translated_path.read_text(encoding="utf-8-sig")
+        self.assertIn("COMMON OK", content)
+        self.assertIn("OPTIONS OK", content)
+        self.assertIn("SCREENS OK", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,9 @@ pip install tkinterdnd2 UnityPy
 
 Sem essa dependência, o app continua funcionando normalmente pelo botão de seleção.
 
+Para habilitar tradução local automática, instale e execute o Ollama no host.
+O app usa o endpoint local padrão: `http://127.0.0.1:11434`.
+
 ## Onde os arquivos de trabalho ficam
 
 - Execução em Python (desenvolvimento): `workspace/` na pasta do projeto
@@ -70,6 +73,15 @@ Para executar o app distribuído no Linux, rode o binário `InterfaceTradutores`
 6. Traduzir externamente e selecionar o TXT final
 7. Executar importação (com pergunta de backup)
 
+Na etapa 3 dos modos Ren'Py/RPGM/Unity, também existe a opção **Exportar + traduzir + importar automaticamente**.
+Ela traduz o TXT exportado localmente via Ollama, salva uma cópia traduzida no workspace e então roda a importação normal.
+Se a tradução local falhar (serviço offline, timeout, cancelamento), o app mantém o TXT exportado pronto para o fluxo manual.
+
+Também na etapa 3 há opções para dividir/juntar TXT grande:
+- **Dividir TXT gerado**: cria `parte_00.txt`, `parte_01.txt`, ... em `Downloads`.
+- **Juntar partes traduzidas**: lê `parte_*.txt` (incluindo variantes como `parte_00.en.pt.txt`), junta em ordem e sobrescreve o TXT da engine no workspace (`all_translations.txt`, `rpgm_translations.txt` ou `unity_translations.txt`).
+- Após juntar com sucesso, as partes usadas são removidas automaticamente.
+
 ## Buzz Automático (legendas)
 
 O app pode automatizar legendagem com Buzz sem precisar operar a interface manualmente.
@@ -91,6 +103,7 @@ No painel “Preparação Buzz (legendas)” você pode:
 - Escolher formatos de saída (`SRT`, `VTT`, `TXT`);
 - Definir pasta fixa de saída (ou manter mesma pasta do vídeo);
 - Clicar em **Gerar legenda (Buzz)** e confirmar a execução.
+- Clicar em **Gerar e traduzir legenda** para traduzir localmente a legenda gerada via Ollama e salvar uma cópia ao lado do arquivo original.
 
 As preferências ficam salvas no mesmo arquivo de configurações do app.
 

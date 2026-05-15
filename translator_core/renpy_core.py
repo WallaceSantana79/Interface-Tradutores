@@ -9,8 +9,6 @@ from typing import TextIO
 from .models import JobResult
 from .utils import create_backup_snapshot, ensure_directory
 
-IGNORAR_ARQUIVOS = ["common.rpy", "options.rpy", "screens.rpy"]
-
 TRANSLATIONS_FILENAME = "all_translations.txt"
 PLACEHOLDERS_FILENAME = "all_placeholders.txt"
 MAP_FILENAME = "renpy_mapa_arquivos.json"
@@ -65,7 +63,7 @@ def _collect_renpy_files(project: Path) -> list[Path]:
 
     files: list[Path] = []
     for p in tl_portuguese_dir.rglob("*.rpy"):
-        if not p.is_file() or p.name in IGNORAR_ARQUIVOS:
+        if not p.is_file():
             continue
         files.append(p)
 

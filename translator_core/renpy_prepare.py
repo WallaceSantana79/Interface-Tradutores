@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import platform
@@ -374,7 +374,9 @@ def abrir_processo_jogo(exe_path: str | Path, project_dir: str | Path) -> subpro
                     "Wine não encontrado. Instale o Wine para abrir executáveis .exe no Linux."
                 )
             return subprocess.Popen([wine_bin, str(exe)], cwd=str(project))
-        if exe.suffix.lower() in {".sh", ".command"} and not os.access(exe, os.X_OK):
+        if exe.suffix.lower() == ".command":
+            return subprocess.Popen(["bash", str(exe)], cwd=str(project))
+        if exe.suffix.lower() == ".sh" and not os.access(exe, os.X_OK):
             return subprocess.Popen(["bash", str(exe)], cwd=str(project))
     return subprocess.Popen([str(exe)], cwd=str(project))
 
@@ -423,3 +425,5 @@ def remover_un_files_de_game(project_dir: str | Path) -> list[Path]:
 
 def processo_ativo(proc: subprocess.Popen[bytes] | None) -> bool:
     return proc is not None and proc.poll() is None
+
+

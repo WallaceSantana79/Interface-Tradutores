@@ -30,6 +30,9 @@ class AppBuzzSettingsTests(unittest.TestCase):
         self.assertFalse(defaults["buzz_word_timestamps"])
         self.assertEqual(defaults["buzz_output_formats"], ["srt"])
         self.assertTrue(defaults["buzz_output_same_dir"])
+        self.assertTrue(isinstance(defaults["local_translation_model"], str))
+        self.assertTrue(isinstance(defaults["local_translation_timeout_seconds"], str))
+        self.assertTrue(isinstance(defaults["local_translation_chunk_lines"], str))
 
     def test_load_app_settings_reads_buzz_preferences(self) -> None:
         payload = {
@@ -42,6 +45,9 @@ class AppBuzzSettingsTests(unittest.TestCase):
             "buzz_output_formats": ["srt", "txt"],
             "buzz_output_same_dir": False,
             "buzz_output_directory": str(self.root),
+            "local_translation_model": "qwen2.5:7b-instruct-q4_K_M",
+            "local_translation_timeout_seconds": "1800",
+            "local_translation_chunk_lines": "120",
         }
         self.settings_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -57,6 +63,9 @@ class AppBuzzSettingsTests(unittest.TestCase):
         self.assertEqual(loaded["buzz_output_formats"], ["srt", "txt"])
         self.assertFalse(loaded["buzz_output_same_dir"])
         self.assertEqual(loaded["buzz_output_directory"], str(self.root))
+        self.assertEqual(loaded["local_translation_model"], "qwen2.5:7b-instruct-q4_K_M")
+        self.assertEqual(loaded["local_translation_timeout_seconds"], "1800")
+        self.assertEqual(loaded["local_translation_chunk_lines"], "120")
 
 
 if __name__ == "__main__":

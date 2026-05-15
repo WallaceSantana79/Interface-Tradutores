@@ -32,6 +32,57 @@ def _read_manifest(manifest_path: Path) -> dict[str, Any]:
     return raw
 
 
+def _split_lines_on_safe_boundaries(lines: list[str], parts_count: int) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    start = 0
+    total = len(lines)
+
+    for idx in range(parts_count):
+        remaining_parts = parts_count - idx
+        remaining_lines = total - start
+        if idx == parts_count - 1:
+            end = total
+        else:
+            min_tail = remaining_parts - 1  # reserve at least one line per remaining chunk
+            ideal = max(1, remaining_lines // remaining_parts)
+            end = min(start + ideal, total - min_tail)
+
+            # Prefer to cut after a blank line to avoid splitting translation blocks.
+            while end < total - min_tail and lines[end - 1].strip() != "":
+                end += 1
+
+        if end <= start:
+            end = min(start + 1, total)
+        chunks.append(lines[start:end])
+        start = end
+    return chunks
+
+
+def _merge_text_chunks_with_boundary_guard(
+    chunks: list[str],
+    *,
+    boundary_requires_blank_line: list[bool] | None = None,
+) -> str:
+    if not chunks:
+        return ""
+    merged = chunks[0]
+    for idx, next_text in enumerate(chunks[1:]):
+        requires_blank = bool(boundary_requires_blank_line[idx]) if boundary_requires_blank_line else False
+        if requires_blank:
+            if not merged.endswith("\n\n"):
+                if merged.endswith("\n") and next_text.startswith("\n"):
+                    pass
+                elif merged.endswith("\n") or next_text.startswith("\n"):
+                    merged += "\n"
+                else:
+                    merged += "\n\n"
+        else:
+            if not merged.endswith("\n") and not next_text.startswith("\n"):
+                merged += "\n"
+        merged += next_text
+    return merged
+
+
 def split_text_file(
     source_path: str | Path,
     output_dir: str | Path,
@@ -55,13 +106,9 @@ def split_text_file(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    base, extra = divmod(len(lines), parts_count)
-    start = 0
+    line_chunks = _split_lines_on_safe_boundaries(lines, parts_count)
     created_files: list[Path] = []
-    for idx in range(parts_count):
-        size = base + (1 if idx < extra else 0)
-        chunk = lines[start : start + size]
-        start += size
+    for idx, chunk in enumerate(line_chunks):
         out_path = out_dir / f"parte_{idx:02d}.txt"
         out_path.write_text("".join(chunk), encoding="utf-8-sig")
         created_files.append(out_path)
@@ -74,6 +121,9 @@ def split_text_file(
         "target_path": str(Path(target_path).resolve()) if target_path else "",
         "total_parts": len(created_files),
         "part_names": [p.name for p in created_files],
+        "boundary_requires_blank_line": [
+            "".join(chunk).endswith("\n\n") for chunk in line_chunks[:-1]
+        ],
     }
     _write_manifest(out_dir / MANIFEST_FILENAME, manifest_payload)
     return created_files
@@ -147,7 +197,18 @@ def merge_parts_into_target(
         raise ValueError(f"Foram encontradas partes extras inesperadas: {extras_text}.")
 
     ordered_parts = [index_map[idx][0] for idx in range(expected_total)]
-    merged = "".join(path.read_text(encoding="utf-8-sig") for path in ordered_parts)
+    chunk_texts = [path.read_text(encoding="utf-8-sig") for path in ordered_parts]
+    boundary_flags: list[bool] | None = None
+    if manifest:
+        raw_flags = manifest.get("boundary_requires_blank_line")
+        if isinstance(raw_flags, list):
+            parsed_flags = [bool(item) for item in raw_flags]
+            if len(parsed_flags) == max(0, len(chunk_texts) - 1):
+                boundary_flags = parsed_flags
+    merged = _merge_text_chunks_with_boundary_guard(
+        chunk_texts,
+        boundary_requires_blank_line=boundary_flags,
+    )
 
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)

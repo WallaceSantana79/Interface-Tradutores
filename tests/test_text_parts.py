@@ -119,6 +119,20 @@ class TextPartsTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 merge_parts_into_target(parts_dir, target, cleanup=True)
 
+    def test_merge_recovers_blank_separator_when_previous_part_loses_trailing_newline(self) -> None:
+        source = self.root / "all_translations.txt"
+        source.write_text("=== game/script.rpy ===\nlinha 1\n\nlinha 2\n\nlinha 3\n", encoding="utf-8-sig")
+        parts_dir = self.root / "downloads"
+        target = self.root / "workspace" / "renpy" / "all_translations.txt"
+        split_text_file(source, parts_dir, 2, engine="renpy", target_path=target)
+
+        first = parts_dir / "parte_00.txt"
+        first.write_text(first.read_text(encoding="utf-8-sig").rstrip("\n"), encoding="utf-8-sig")
+
+        merge_parts_into_target(parts_dir, target, cleanup=True)
+        merged = target.read_text(encoding="utf-8-sig")
+        self.assertIn("linha 2\n\nlinha 3", merged)
+
 
 if __name__ == "__main__":
     unittest.main()

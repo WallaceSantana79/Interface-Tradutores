@@ -112,6 +112,32 @@ class CoreWorkflowTests(unittest.TestCase):
         final_text = script_path.read_text(encoding="utf-8-sig")
         self.assertIn('"Reproduza intro.mp4 e sprite.gif"', final_text)
 
+    def test_renpy_restores_nested_image_tag_placeholders(self) -> None:
+        project = self.root / "renpy_image_tag"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
+        script_path.write_text(
+            '# oc_nvl "{image=gymlateralsmall.webp}"\n'
+            'oc_nvl "{image=gymlateralsmall.webp}"\n',
+            encoding="utf-8-sig",
+        )
+
+        export_result = exportar("renpy", project, self.workspace)
+        self.assertTrue(export_result.success, export_result.message)
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        content = translated_path.read_text(encoding="utf-8-sig")
+        self.assertIn("[PLACEHOLDER_", content)
+        translated_path.write_text(content, encoding="utf-8-sig")
+
+        import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+        self.assertTrue(import_result.success, import_result.message)
+
+        final_text = script_path.read_text(encoding="utf-8-sig")
+        self.assertIn('oc_nvl "{image=gymlateralsmall.webp}"', final_text)
+        self.assertNotIn("[PLACEHOLDER_", final_text)
+
     def test_rpgm_export_and_import(self) -> None:
         project = self.root / "rpgm_data"
         project.mkdir(parents=True)

@@ -342,8 +342,12 @@ def proteger_placeholders(texto: str) -> tuple[str, list[str]]:
 
 
 def restaurar_placeholders(text: str, phs: list[str]) -> str:
-    for i, ph in enumerate(phs):
-        text = text.replace(f"[PLACEHOLDER_{i}]", ph)
+    for _ in range(len(phs) + 1):
+        before = text
+        for i in range(len(phs) - 1, -1, -1):
+            text = text.replace(f"[PLACEHOLDER_{i}]", phs[i])
+        if text == before or "[PLACEHOLDER_" not in text:
+            break
     return text
 
 

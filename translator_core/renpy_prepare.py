@@ -302,6 +302,41 @@ def preparar_descompactador(
     return destination
 
 
+def executar_unren_em_pasta(
+    project_dir: str | Path,
+    unren_dir: str | Path,
+    *,
+    script_name: str = "UnRen-forall.bat",
+    abrir_interativo: bool = True,
+) -> Path:
+    project = Path(project_dir)
+    source_dir = Path(unren_dir)
+
+    if not project.exists() or not project.is_dir():
+        raise FileNotFoundError(f"Pasta de projeto inválida: {project}")
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise FileNotFoundError(f"Pasta do UnRen inválida: {source_dir}")
+
+    script = source_dir / script_name
+    if not script.exists() or not script.is_file():
+        raise FileNotFoundError(f"Script do UnRen não encontrado: {script}")
+
+    if abrir_interativo:
+        if _is_windows():
+            command = f'start "UnRen" /D "{source_dir}" "{script}" "{project}"'
+            subprocess.Popen(command, cwd=source_dir, shell=True)
+        else:
+            wine_bin = shutil.which("wine")
+            if not wine_bin:
+                raise RuntimeError(
+                    "Wine não encontrado. Para rodar este UnRen .bat no Linux, instale o Wine "
+                    "(ex.: sudo apt install wine64)."
+                )
+            subprocess.Popen([wine_bin, "cmd", "/c", script.name, str(project)], cwd=str(source_dir))
+
+    return script
+
+
 def remover_descompactador_temporario(bat_path: str | Path) -> bool:
     target = Path(bat_path)
     if not target.exists():

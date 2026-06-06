@@ -7,6 +7,9 @@ workspace/
 build/
 dist/
 *.spec
+!InterfaceTradutores.spec
 Ren'pys
+Ren'Pys/
+RenPys/
 Teste
 .codex

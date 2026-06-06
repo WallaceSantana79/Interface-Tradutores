@@ -56,6 +56,7 @@ from translator_core.renpy_prepare import (
     copiar_un_files_para_game,
     detectar_executavel_jogo,
     detectar_versao_renpy,
+    executar_unren_em_pasta,
     listar_launchers,
     preparar_descompactador,
     processo_ativo,
@@ -131,7 +132,7 @@ TOOLS_DIR_NAME = "FERRAMENTAS - TRADUZIR - RENPY"
 
 def _pick_existing_path(candidates: list[Path], fallback: Path) -> Path:
     for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
+        if candidate.exists():
             return candidate
     return fallback
 
@@ -143,8 +144,13 @@ def _default_tools_dir() -> Path:
 def _default_unren_source() -> str:
     tools_dir = _default_tools_dir()
     if _is_windows():
+        folder_candidates = [
+            path
+            for path in sorted(tools_dir.glob("UnRen-forall-*"), reverse=True)
+            if path.is_dir() and (path / "UnRen-forall.bat").is_file()
+        ]
         names = ["UnRen-forall.bat", "UnRen-forall.txt", "UnRen-Linux.sh", "UnRen-forall.sh"]
-        candidates = [tools_dir / name for name in names]
+        candidates = folder_candidates + [tools_dir / name for name in names]
     else:
         names = ["UnRen-Linux.sh", "UnRen-forall.sh", "UnRen-forall.bat", "UnRen-forall.txt"]
         command_candidates = sorted(tools_dir.glob("UnRen*.command"))
@@ -674,6 +680,12 @@ class TranslatorWizardApp:
             command=self._pick_unren_source,
         )
         self.pick_unren_source_button.pack(side="left", padx=(8, 0), pady=(0, 6))
+        self.pick_unren_folder_button = ttk.Button(
+            unren_row,
+            text="Configurar pasta UnRen",
+            command=self._pick_unren_folder,
+        )
+        self.pick_unren_folder_button.pack(side="left", padx=(8, 0), pady=(0, 6))
 
         force_row = ttk.Frame(self.renpy_prepare_frame)
         force_row.pack(fill="x", padx=8)
@@ -732,6 +744,7 @@ class TranslatorWizardApp:
             self.run_un_cycle_button,
             self.pick_launchers_root_button,
             self.pick_unren_source_button,
+            self.pick_unren_folder_button,
             self.pick_force_language_button,
             self.pick_un_rpy_button,
             self.pick_un_rpyc_button,
@@ -1845,6 +1858,17 @@ class TranslatorWizardApp:
         self._save_settings()
         self._set_message("Fonte do UnRen atualizada.")
 
+    def _pick_unren_folder(self) -> None:
+        if self._game_running():
+            self._set_message("Feche o jogo em execução para alterar a pasta do UnRen.")
+            return
+        selected = filedialog.askdirectory(title="Selecione a pasta do UnRen")
+        if not selected:
+            return
+        self.unren_source_var.set(selected)
+        self._save_settings()
+        self._set_message("Pasta do UnRen atualizada. Ele será executado sem copiar arquivos para o jogo.")
+
     def _pick_force_language_source(self) -> None:
         if self._game_running():
             self._set_message("Feche o jogo em execução para alterar o force_language.")
@@ -2276,6 +2300,26 @@ class TranslatorWizardApp:
 
         source_path = Path(self.unren_source_var.get().strip())
         project_path = Path(self.project_dir_var.get())
+        if source_path.is_dir():
+            try:
+                executed_script = executar_unren_em_pasta(
+                    project_path,
+                    source_path,
+                    abrir_interativo=True,
+                )
+            except Exception as exc:
+                messagebox.showerror("Erro ao executar UnRen", str(exc))
+                self._set_message(f"Falha ao executar UnRen em pasta: {exc}")
+                return
+
+            self.unren_temp_bat_path = None
+            self.unren_temp_should_remove = False
+            self._set_message(
+                "UnRen aberto a partir da pasta própria. "
+                f"Nenhum arquivo foi copiado para o jogo: {executed_script.parent}"
+            )
+            return
+
         destination = project_path / "UnRen-forall.bat"
         if platform.system() != "Windows":
             if source_path.suffix.lower() == ".txt":

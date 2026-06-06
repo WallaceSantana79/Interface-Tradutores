@@ -14,6 +14,7 @@ from translator_core.renpy_prepare import (
     copiar_un_files_para_game,
     detectar_executavel_jogo,
     detectar_versao_renpy,
+    executar_unren_em_pasta,
     listar_launchers,
     preparar_descompactador,
     remover_un_files_de_game,
@@ -106,6 +107,27 @@ class RenpyPrepareTests(unittest.TestCase):
         removed = remover_descompactador_temporario(copied)
         self.assertTrue(removed)
         self.assertFalse(copied.exists())
+
+    def test_execute_unren_folder_windows_passes_project_argument(self) -> None:
+        project = self.root / "game_unren_folder"
+        project.mkdir(parents=True)
+        unren_dir = self.root / "UnRen-forall-la_0.77-le_9.7.60-cu_9.7.80"
+        unren_dir.mkdir(parents=True)
+        script = unren_dir / "UnRen-forall.bat"
+        script.write_text("@echo off\necho teste\n", encoding="utf-8")
+
+        with patch("translator_core.renpy_prepare._is_windows", return_value=True):
+            with patch("subprocess.Popen") as popen_mock:
+                popen_mock.return_value = SimpleNamespace()
+                executed = executar_unren_em_pasta(project, unren_dir, abrir_interativo=True)
+
+        self.assertEqual(executed, script)
+        popen_mock.assert_called_once()
+        args, kwargs = popen_mock.call_args
+        self.assertIn(str(project), args[0])
+        self.assertIn(str(script), args[0])
+        self.assertEqual(kwargs.get("cwd"), unren_dir)
+        self.assertTrue(kwargs.get("shell"))
 
     def test_apply_force_language_to_game_folder(self) -> None:
         project = self.root / "game_force"

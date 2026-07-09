@@ -124,10 +124,11 @@ class RenpyPrepareTests(unittest.TestCase):
         self.assertEqual(executed, script)
         popen_mock.assert_called_once()
         args, kwargs = popen_mock.call_args
-        self.assertIn(str(project), args[0])
-        self.assertIn(str(script), args[0])
+        self.assertEqual(
+            args[0],
+            ["cmd", "/c", "start", "", "/D", str(unren_dir), script.name, str(project)],
+        )
         self.assertEqual(kwargs.get("cwd"), unren_dir)
-        self.assertTrue(kwargs.get("shell"))
 
     def test_apply_force_language_to_game_folder(self) -> None:
         project = self.root / "game_force"

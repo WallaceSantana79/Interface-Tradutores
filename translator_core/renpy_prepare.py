@@ -323,8 +323,10 @@ def executar_unren_em_pasta(
 
     if abrir_interativo:
         if _is_windows():
-            command = f'start "UnRen" /D "{source_dir}" "{script}" "{project}"'
-            subprocess.Popen(command, cwd=source_dir, shell=True)
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", "/D", str(source_dir), script.name, str(project)],
+                cwd=source_dir,
+            )
         else:
             wine_bin = shutil.which("wine")
             if not wine_bin:

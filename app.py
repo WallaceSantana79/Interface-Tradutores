@@ -2300,11 +2300,20 @@ class TranslatorWizardApp:
 
         source_path = Path(self.unren_source_var.get().strip())
         project_path = Path(self.project_dir_var.get())
-        if source_path.is_dir():
+        bundled_unren_script = (
+            source_path.is_file()
+            and source_path.suffix.lower() == ".bat"
+            and (source_path.parent / "UnRen-legacy.bat").is_file()
+            and (source_path.parent / "UnRen-current.bat").is_file()
+        )
+        if source_path.is_dir() or bundled_unren_script:
+            unren_dir = source_path if source_path.is_dir() else source_path.parent
+            script_name = "UnRen-forall.bat" if source_path.is_dir() else source_path.name
             try:
                 executed_script = executar_unren_em_pasta(
                     project_path,
-                    source_path,
+                    unren_dir,
+                    script_name=script_name,
                     abrir_interativo=True,
                 )
             except Exception as exc:

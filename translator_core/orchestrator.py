@@ -9,6 +9,7 @@ from .renpy_core import (
     TRANSLATIONS_FILENAME as RENPY_TRANSLATIONS,
     carregar_placeholders_global as renpy_load_placeholders,
     carregar_traducoes_global as renpy_load_translations,
+    expected_new_counts_from_plan as renpy_expected_new_counts_from_plan,
     exportar_renpy,
     importar_renpy,
     resolve_renpy_portuguese_dir,
@@ -101,7 +102,13 @@ def _validate_project_directory(engine: str, project_dir: Path) -> JobResult:
     return JobResult(True, "Pasta válida.")
 
 
-def exportar(engine: str, project_dir: str | Path, workspace_dir: str | Path) -> JobResult:
+def exportar(
+    engine: str,
+    project_dir: str | Path,
+    workspace_dir: str | Path,
+    *,
+    use_translation_memory: bool = True,
+) -> JobResult:
     normalized = normalize_engine(engine)
     project = Path(project_dir)
     workspace = engine_workspace_dir(normalized, workspace_dir)
@@ -111,7 +118,7 @@ def exportar(engine: str, project_dir: str | Path, workspace_dir: str | Path) ->
         return valid
 
     if normalized == ENGINE_RENPY:
-        return exportar_renpy(project, workspace)
+        return exportar_renpy(project, workspace, use_translation_memory=use_translation_memory)
     if normalized == ENGINE_RPGM:
         return exportar_rpgm(project, workspace)
     if normalized == ENGINE_UNITY:
@@ -149,17 +156,25 @@ def pre_validar_importacao(
 
         t_map = renpy_load_translations(translated)
         p_map = renpy_load_placeholders(placeholders)
-        if not t_map:
+        plan_counts = renpy_expected_new_counts_from_plan(workspace)
+        if not t_map and not (plan_counts is not None and sum(plan_counts.values()) == 0):
             return JobResult(False, "TXT traduzido não possui blocos válidos (Ren'Py).")
 
-        for chave, tr_list in t_map.items():
+        keys_to_validate = sorted(plan_counts.keys()) if plan_counts is not None else sorted(t_map.keys())
+        for chave in keys_to_validate:
+            tr_list = t_map.get(chave, [])
             ph_list = p_map.get(chave)
             if ph_list is None:
                 warnings.append(f"Chave {chave} sem placeholders correspondentes.")
                 continue
-            if len(tr_list) != len(ph_list):
+            expected_count = plan_counts[chave] if plan_counts is not None else len(ph_list)
+            if len(tr_list) != expected_count:
                 warnings.append(
-                    f"Chave {chave}: {len(tr_list)} traduções vs {len(ph_list)} placeholders."
+                    f"Chave {chave}: {len(tr_list)} traduções vs {expected_count} esperada(s) pelo plano."
+                )
+            if len(ph_list) != expected_count:
+                warnings.append(
+                    f"Chave {chave}: {len(ph_list)} placeholders vs {expected_count} esperado(s) pelo plano."
                 )
 
     elif normalized == ENGINE_RPGM:

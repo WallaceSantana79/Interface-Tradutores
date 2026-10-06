@@ -64,6 +64,7 @@ from translator_core.renpy_prepare import (
     remover_descompactador_temporario,
     selecionar_launcher_compativel,
 )
+from translator_core.renpy_core import expected_new_counts_from_plan
 from translator_core.unity_core import (
     clear_unity_selected_table_for_project,
     describe_unity_data_dir,
@@ -84,7 +85,7 @@ except ImportError:
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "v1.12"
+APP_VERSION = "v1.13"
 APP_DEFAULT_GEOMETRY = "780x560"
 APP_BASE_MIN_SIZE = (700, 500)
 APP_RENPY_STEP2_MIN_SIZE = (740, 640)
@@ -300,6 +301,7 @@ def _default_settings() -> dict[str, Any]:
         "local_translation_model": DEFAULT_MODEL,
         "local_translation_timeout_seconds": str(DEFAULT_TOTAL_TIMEOUT_SECONDS),
         "local_translation_chunk_lines": str(DEFAULT_CHUNK_LINES),
+        "renpy_reuse_translation_memory": True,
     }
 
 
@@ -343,6 +345,10 @@ def load_app_settings() -> dict[str, Any]:
     buzz_output_same_dir = loaded.get("buzz_output_same_dir")
     if isinstance(buzz_output_same_dir, bool):
         settings["buzz_output_same_dir"] = buzz_output_same_dir
+
+    renpy_reuse_translation_memory = loaded.get("renpy_reuse_translation_memory")
+    if isinstance(renpy_reuse_translation_memory, bool):
+        settings["renpy_reuse_translation_memory"] = renpy_reuse_translation_memory
 
     output_formats = loaded.get("buzz_output_formats")
     if isinstance(output_formats, list):
@@ -430,6 +436,9 @@ class TranslatorWizardApp:
         self.local_translation_model_var = tk.StringVar(value=self.settings["local_translation_model"])
         self.local_translation_timeout_var = tk.StringVar(value=self.settings["local_translation_timeout_seconds"])
         self.local_translation_chunk_var = tk.StringVar(value=self.settings["local_translation_chunk_lines"])
+        self.renpy_reuse_translation_memory_var = tk.BooleanVar(
+            value=bool(self.settings["renpy_reuse_translation_memory"])
+        )
         self.split_parts_var = tk.StringVar(value="4")
         self.keep_parts_after_merge_var = tk.BooleanVar(value=False)
         self.ollama_status_var = tk.StringVar(value="Ollama: verificando...")
@@ -988,6 +997,14 @@ class TranslatorWizardApp:
 
         self.workspace_label = ttk.Label(frame, text="")
         self.workspace_label.pack(anchor="w", pady=(0, 8))
+
+        self.renpy_reuse_memory_check = ttk.Checkbutton(
+            frame,
+            text="Reaproveitar traduções anteriores (Ren'Py)",
+            variable=self.renpy_reuse_translation_memory_var,
+            command=self._save_settings,
+        )
+        self.renpy_reuse_memory_check.pack(anchor="w", pady=(0, 8))
 
         ttk.Button(frame, text="Executar exportação", command=self._run_export).pack(anchor="w")
         self.auto_translate_import_button = ttk.Button(
@@ -1680,6 +1697,7 @@ class TranslatorWizardApp:
         self.settings["local_translation_model"] = self.local_translation_model_var.get().strip() or DEFAULT_MODEL
         self.settings["local_translation_timeout_seconds"] = self.local_translation_timeout_var.get().strip()
         self.settings["local_translation_chunk_lines"] = self.local_translation_chunk_var.get().strip()
+        self.settings["renpy_reuse_translation_memory"] = bool(self.renpy_reuse_translation_memory_var.get())
         self.settings["game_exe_by_project"] = self._get_game_exe_map()
         self.settings["unity_table_selection_by_project"] = self._get_unity_table_selection_map()
         save_app_settings(self.settings)
@@ -1763,6 +1781,8 @@ class TranslatorWizardApp:
             self.auto_translate_import_button.configure(state="disabled" if app_busy else "normal")
         if hasattr(self, "cancel_translation_button"):
             self.cancel_translation_button.configure(state="normal" if translation_busy else "disabled")
+        if hasattr(self, "renpy_reuse_memory_check"):
+            self.renpy_reuse_memory_check.configure(state="normal" if (is_renpy and not app_busy) else "disabled")
 
         if not is_renpy:
             if self.current_step == 1:
@@ -3135,7 +3155,12 @@ class TranslatorWizardApp:
         engine = self.engine_var.get()
         if normalize_engine(engine) == ENGINE_UNITY:
             self._auto_apply_unity_table_highlight()
-        result = exportar(engine, self.project_dir_var.get(), WORKSPACE_ROOT)
+        result = exportar(
+            engine,
+            self.project_dir_var.get(),
+            WORKSPACE_ROOT,
+            use_translation_memory=bool(self.renpy_reuse_translation_memory_var.get()),
+        )
         if not result.success:
             messagebox.showerror("Erro na exportação", result.message)
             self._set_message(result.message)
@@ -3155,7 +3180,8 @@ class TranslatorWizardApp:
         if result.warnings:
             details += "\n\n" + "\n".join(f"- {w}" for w in result.warnings)
         messagebox.showinfo("Exportação concluída", details)
-        self._set_message(f"{result.message} Agora traduza e selecione o TXT final.")
+        summary = result.warnings[0] if result.warnings else ""
+        self._set_message(f"{result.message} {summary} Agora traduza e selecione o TXT final.")
 
     def _run_auto_export_translate_import(self) -> None:
         if not self._validate_project_dir():
@@ -3185,7 +3211,12 @@ class TranslatorWizardApp:
 
         self._set_message("Exportando textos...")
         self.root.update_idletasks()
-        export_result = exportar(engine, self.project_dir_var.get(), WORKSPACE_ROOT)
+        export_result = exportar(
+            engine,
+            self.project_dir_var.get(),
+            WORKSPACE_ROOT,
+            use_translation_memory=bool(self.renpy_reuse_translation_memory_var.get()),
+        )
         if not export_result.success:
             messagebox.showerror("Erro na exportação", export_result.message)
             self._set_message(export_result.message)
@@ -3200,6 +3231,17 @@ class TranslatorWizardApp:
         self.open_generated_button.configure(state="normal")
         self.open_generated_folder_button.configure(state="normal")
         self._set_split_join_buttons_state(True)
+
+        plan_counts = (
+            expected_new_counts_from_plan(engine_ws)
+            if normalize_engine(engine) == ENGINE_RENPY
+            else None
+        )
+        if plan_counts is not None and sum(plan_counts.values()) == 0:
+            self._set_message("Todas as falas foram reaproveitadas. Importando diretamente da memória...")
+            self.root.update_idletasks()
+            self._run_import_for_selected_file(auto_mode=True)
+            return
 
         translated_output = local_translated_path(self.generated_translation_path, engine_ws)
         self._set_message(f"Iniciando tradução local: {self.generated_translation_path.name}")

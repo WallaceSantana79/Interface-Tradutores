@@ -3,7 +3,9 @@ from __future__ import annotations
 import shutil
 import unittest
 import uuid
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from translator_core.orchestrator import exportar, importar
 
@@ -15,8 +17,14 @@ class RenpyScopeTests(unittest.TestCase):
         self.root = base / f"renpy_scope_{uuid.uuid4().hex}"
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = self.root / "workspace"
+        self.env_patcher = patch.dict(
+            os.environ,
+            {"INTERFACE_TRADUTORES_MEMORY_DIR": str(self.root / "translation_memory")},
+        )
+        self.env_patcher.start()
 
     def tearDown(self) -> None:
+        self.env_patcher.stop()
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_root_project_does_not_touch_renpy_common(self) -> None:

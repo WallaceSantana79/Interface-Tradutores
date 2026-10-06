@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from translator_core.orchestrator import exportar, importar, pre_validar_importacao
 
@@ -16,8 +18,14 @@ class CoreWorkflowTests(unittest.TestCase):
         self.root = base / f"core_test_{uuid.uuid4().hex}"
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = self.root / "workspace"
+        self.env_patcher = patch.dict(
+            os.environ,
+            {"INTERFACE_TRADUTORES_MEMORY_DIR": str(self.root / "translation_memory")},
+        )
+        self.env_patcher.start()
 
     def tearDown(self) -> None:
+        self.env_patcher.stop()
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_renpy_export_and_import(self) -> None:
@@ -50,6 +58,185 @@ class CoreWorkflowTests(unittest.TestCase):
 
         final_text = script_path.read_text(encoding="utf-8-sig")
         self.assertIn('"Oi [player]"', final_text)
+
+    def test_renpy_translation_memory_exports_only_new_lines_and_imports_full_script(self) -> None:
+        memory_root = self.root / "translation_memory"
+        with patch.dict(os.environ, {"INTERFACE_TRADUTORES_MEMORY_DIR": str(memory_root)}):
+            project_v04 = self.root / "Memory Game v0.4 pc"
+            tl_v04 = project_v04 / "game" / "tl" / "portuguese"
+            tl_v04.mkdir(parents=True)
+            script_v04 = tl_v04 / "script.rpy"
+            script_v04.write_text(
+                '# e "Hello [player]"\n'
+                'e "Hello [player]"\n'
+                '# e "Good night"\n'
+                'e "Good night"\n',
+                encoding="utf-8-sig",
+            )
+
+            export_result = exportar("renpy", project_v04, self.workspace)
+            self.assertTrue(export_result.success, export_result.message)
+            translated_path = self.workspace / "renpy" / "all_translations.txt"
+            content = translated_path.read_text(encoding="utf-8-sig")
+            translated_path.write_text(
+                content.replace("Hello [PLACEHOLDER_0]", "Olá [PLACEHOLDER_0]").replace(
+                    "Good night", "Boa noite"
+                ),
+                encoding="utf-8-sig",
+            )
+            import_result = importar("renpy", project_v04, self.workspace, translated_path, criar_backup=False)
+            self.assertTrue(import_result.success, import_result.message)
+
+            project_v05 = self.root / "Memory Game v0.5 pc"
+            tl_v05 = project_v05 / "game" / "tl" / "portuguese"
+            tl_v05.mkdir(parents=True)
+            script_v05 = tl_v05 / "script.rpy"
+            script_v05.write_text(
+                '# e "Hello [player]"\n'
+                'e "Hello [player]"\n'
+                '# e "New middle line"\n'
+                'e "New middle line"\n'
+                '# e "Good night"\n'
+                'e "Good night"\n',
+                encoding="utf-8-sig",
+            )
+
+            export_result = exportar("renpy", project_v05, self.workspace)
+            self.assertTrue(export_result.success, export_result.message)
+            exported = translated_path.read_text(encoding="utf-8-sig")
+            self.assertIn("New middle line", exported)
+            self.assertNotIn("Hello [PLACEHOLDER_0]", exported)
+            self.assertNotIn("Good night", exported)
+
+            translated_path.write_text(
+                exported.replace("New middle line", "Nova fala no meio"),
+                encoding="utf-8-sig",
+            )
+            pre = pre_validar_importacao("renpy", project_v05, self.workspace, translated_path)
+            self.assertTrue(pre.success, pre.message)
+
+            import_result = importar("renpy", project_v05, self.workspace, translated_path, criar_backup=False)
+            self.assertTrue(import_result.success, import_result.message)
+            final_text = script_v05.read_text(encoding="utf-8-sig")
+            self.assertIn('e "Olá [player]"', final_text)
+            self.assertIn('e "Nova fala no meio"', final_text)
+            self.assertIn('e "Boa noite"', final_text)
+
+            memory_path = memory_root / "renpy" / "memory-game.json"
+            memory = json.loads(memory_path.read_text(encoding="utf-8"))
+            entry = next(entry for entry in memory["entries"].values() if entry["source"] == "Good night")
+            self.assertEqual(entry["translation"], "Boa noite")
+            self.assertIn("last_relpath", entry)
+            self.assertGreaterEqual(entry["use_count"], 2)
+            self.assertIn("created_at", entry)
+            self.assertIn("updated_at", entry)
+
+    def test_renpy_translation_memory_all_reused_allows_empty_translation_txt(self) -> None:
+        memory_root = self.root / "translation_memory_all_reused"
+        with patch.dict(os.environ, {"INTERFACE_TRADUTORES_MEMORY_DIR": str(memory_root)}):
+            project = self.root / "All Reused Game"
+            tl_dir = project / "game" / "tl" / "portuguese"
+            tl_dir.mkdir(parents=True)
+            script_path = tl_dir / "script.rpy"
+            script_path.write_text('# e "Repeat me"\ne "Repeat me"\n', encoding="utf-8-sig")
+
+            export_result = exportar("renpy", project, self.workspace)
+            self.assertTrue(export_result.success, export_result.message)
+            translated_path = self.workspace / "renpy" / "all_translations.txt"
+            translated_path.write_text(
+                translated_path.read_text(encoding="utf-8-sig").replace("Repeat me", "Repita comigo"),
+                encoding="utf-8-sig",
+            )
+            import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+            self.assertTrue(import_result.success, import_result.message)
+
+            script_path.write_text('# e "Repeat me"\ne "Repeat me"\n', encoding="utf-8-sig")
+            export_result = exportar("renpy", project, self.workspace)
+            self.assertTrue(export_result.success, export_result.message)
+            exported = translated_path.read_text(encoding="utf-8-sig")
+            self.assertIn("=== ARQUIVO_000 ===", exported)
+            self.assertNotIn("Repeat me", exported)
+
+            pre = pre_validar_importacao("renpy", project, self.workspace, translated_path)
+            self.assertTrue(pre.success, pre.message)
+            import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+            self.assertTrue(import_result.success, import_result.message)
+            self.assertIn('e "Repita comigo"', script_path.read_text(encoding="utf-8-sig"))
+
+    def test_renpy_export_can_disable_translation_memory(self) -> None:
+        memory_root = self.root / "translation_memory_disabled"
+        with patch.dict(os.environ, {"INTERFACE_TRADUTORES_MEMORY_DIR": str(memory_root)}):
+            project = self.root / "Memory Disabled Game"
+            tl_dir = project / "game" / "tl" / "portuguese"
+            tl_dir.mkdir(parents=True)
+            script_path = tl_dir / "script.rpy"
+            script_path.write_text('# e "No cache"\ne "No cache"\n', encoding="utf-8-sig")
+
+            export_result = exportar("renpy", project, self.workspace, use_translation_memory=False)
+            self.assertTrue(export_result.success, export_result.message)
+            exported = (self.workspace / "renpy" / "all_translations.txt").read_text(encoding="utf-8-sig")
+            self.assertIn("No cache", exported)
+            self.assertFalse((self.workspace / "renpy" / "renpy_export_plan.json").exists())
+
+            translated_path = self.workspace / "renpy" / "all_translations.txt"
+            translated_path.write_text(exported.replace("No cache", "Sem memoria"), encoding="utf-8-sig")
+            import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+            self.assertTrue(import_result.success, import_result.message)
+            self.assertIn('e "Sem memoria"', script_path.read_text(encoding="utf-8-sig"))
+
+    def test_renpy_rejects_memory_plan_from_another_game(self) -> None:
+        first_project = self.root / "First Game"
+        first_tl_dir = first_project / "game" / "tl" / "portuguese"
+        first_tl_dir.mkdir(parents=True)
+        (first_tl_dir / "script.rpy").write_text('# e "First"\ne "First"\n', encoding="utf-8-sig")
+        self.assertTrue(exportar("renpy", first_project, self.workspace).success)
+
+        second_project = self.root / "Second Game"
+        second_tl_dir = second_project / "game" / "tl" / "portuguese"
+        second_tl_dir.mkdir(parents=True)
+        (second_tl_dir / "script.rpy").write_text('# e "Second"\ne "Second"\n', encoding="utf-8-sig")
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        import_result = importar("renpy", second_project, self.workspace, translated_path, criar_backup=False)
+        self.assertFalse(import_result.success)
+        self.assertIn("não pertence ao projeto", import_result.message)
+
+    def test_renpy_voice_comments_do_not_create_new_translation_entries(self) -> None:
+        project = self.root / "renpy_voice_comments"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
+        script_path.write_text(
+            '# voice "audio/line.ogg"\n'
+            '# e "Already translated"\n'
+            'voice "audio/line.ogg"\n'
+            'e "Already translated"\n',
+            encoding="utf-8-sig",
+        )
+
+        first_export = exportar("renpy", project, self.workspace)
+        self.assertTrue(first_export.success, first_export.message)
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        translated_path.write_text(
+            translated_path.read_text(encoding="utf-8-sig").replace("Already translated", "Ja traduzida"),
+            encoding="utf-8-sig",
+        )
+        self.assertTrue(importar("renpy", project, self.workspace, translated_path, criar_backup=False).success)
+
+        script_path.write_text(
+            '# voice "audio/line.ogg"\n'
+            '# e "Already translated"\n'
+            'voice "audio/line.ogg"\n'
+            'e "Already translated"\n',
+            encoding="utf-8-sig",
+        )
+        second_export = exportar("renpy", project, self.workspace)
+        self.assertTrue(second_export.success, second_export.message)
+        self.assertIn("0 nova(s)", second_export.warnings[0])
+        self.assertEqual(
+            (self.workspace / "renpy" / "all_translations.txt").read_text(encoding="utf-8-sig"),
+            "=== ARQUIVO_000 ===\n\n\n",
+        )
 
     def test_renpy_preserves_technical_asset_paths_inside_translated_line(self) -> None:
         project = self.root / "renpy_assets_in_line"
@@ -137,6 +324,63 @@ class CoreWorkflowTests(unittest.TestCase):
         final_text = script_path.read_text(encoding="utf-8-sig")
         self.assertIn('oc_nvl "{image=gymlateralsmall.webp}"', final_text)
         self.assertNotIn("[PLACEHOLDER_", final_text)
+
+    def test_renpy_import_escapes_inner_double_quotes(self) -> None:
+        project = self.root / "renpy_inner_quotes"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
+        script_path.write_text(
+            '# mcm "Why people can\'t live without this \\"fucking\\" part though..."\n'
+            'mcm "Why people can\'t live without this \\"fucking\\" part though..."\n',
+            encoding="utf-8-sig",
+        )
+
+        export_result = exportar("renpy", project, self.workspace)
+        self.assertTrue(export_result.success, export_result.message)
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        content = translated_path.read_text(encoding="utf-8-sig")
+        translated_path.write_text(
+            content.replace(
+                'Why people can\'t live without this \\"fucking\\" part though...',
+                'Mas por que as pessoas não conseguem viver sem essa parte do "maldito" mesmo...',
+            ),
+            encoding="utf-8-sig",
+        )
+
+        import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+        self.assertTrue(import_result.success, import_result.message)
+
+        final_text = script_path.read_text(encoding="utf-8-sig")
+        self.assertIn('mcm "Mas por que as pessoas não conseguem viver sem essa parte do \\"maldito\\" mesmo..."', final_text)
+
+    def test_renpy_import_fixes_even_backslashes_before_quotes(self) -> None:
+        project = self.root / "renpy_even_slashes_quotes"
+        tl_dir = project / "game" / "tl" / "portuguese"
+        tl_dir.mkdir(parents=True)
+        script_path = tl_dir / "script.rpy"
+        script_path.write_text(
+            '# mcm "Original line"\n'
+            'mcm "Original line"\n',
+            encoding="utf-8-sig",
+        )
+
+        export_result = exportar("renpy", project, self.workspace)
+        self.assertTrue(export_result.success, export_result.message)
+
+        translated_path = self.workspace / "renpy" / "all_translations.txt"
+        content = translated_path.read_text(encoding="utf-8-sig")
+        translated_path.write_text(
+            content.replace("Original line", 'Texto com \\\\"aspas suspeitas\\\\" aqui'),
+            encoding="utf-8-sig",
+        )
+
+        import_result = importar("renpy", project, self.workspace, translated_path, criar_backup=False)
+        self.assertTrue(import_result.success, import_result.message)
+
+        final_text = script_path.read_text(encoding="utf-8-sig")
+        self.assertIn('mcm "Texto com \\\\\\"aspas suspeitas\\\\\\" aqui"', final_text)
 
     def test_rpgm_export_and_import(self) -> None:
         project = self.root / "rpgm_data"

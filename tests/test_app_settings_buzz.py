@@ -33,6 +33,7 @@ class AppBuzzSettingsTests(unittest.TestCase):
         self.assertTrue(isinstance(defaults["local_translation_model"], str))
         self.assertTrue(isinstance(defaults["local_translation_timeout_seconds"], str))
         self.assertTrue(isinstance(defaults["local_translation_chunk_lines"], str))
+        self.assertTrue(defaults["renpy_reuse_translation_memory"])
 
     def test_load_app_settings_reads_buzz_preferences(self) -> None:
         payload = {
@@ -48,6 +49,7 @@ class AppBuzzSettingsTests(unittest.TestCase):
             "local_translation_model": "qwen2.5:7b-instruct-q4_K_M",
             "local_translation_timeout_seconds": "1800",
             "local_translation_chunk_lines": "120",
+            "renpy_reuse_translation_memory": False,
         }
         self.settings_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -66,6 +68,7 @@ class AppBuzzSettingsTests(unittest.TestCase):
         self.assertEqual(loaded["local_translation_model"], "qwen2.5:7b-instruct-q4_K_M")
         self.assertEqual(loaded["local_translation_timeout_seconds"], "1800")
         self.assertEqual(loaded["local_translation_chunk_lines"], "120")
+        self.assertFalse(loaded["renpy_reuse_translation_memory"])
 
 
 if __name__ == "__main__":

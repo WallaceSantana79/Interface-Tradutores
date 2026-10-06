@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import TextIO
 
 from .models import JobResult
@@ -13,6 +15,8 @@ TRANSLATIONS_FILENAME = "all_translations.txt"
 PLACEHOLDERS_FILENAME = "all_placeholders.txt"
 MAP_FILENAME = "renpy_mapa_arquivos.json"
 IMPORT_LOG_FILENAME = "renpy_import_log.txt"
+EXPORT_PLAN_FILENAME = "renpy_export_plan.json"
+MEMORY_ENV_VAR = "INTERFACE_TRADUTORES_MEMORY_DIR"
 
 _TECHNICAL_FILE_EXT_RE = re.compile(
     r"\.(png|jpe?g|gif|webp|svg|bmp|ico|mp3|ogg|wav|m4a|webm|mp4|avi|mov|"
@@ -34,6 +38,124 @@ _TECHNICAL_ASSET_REF_RE = re.compile(
 
 def expected_workspace_files() -> list[str]:
     return [TRANSLATIONS_FILENAME, PLACEHOLDERS_FILENAME, MAP_FILENAME]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _translation_memory_root() -> Path:
+    override = os.environ.get(MEMORY_ENV_VAR, "").strip()
+    if override:
+        return Path(override) / "renpy"
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    elif os.name == "posix" and os.uname().sysname == "Darwin":  # type: ignore[attr-defined]
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return base / "InterfaceTradutores" / "translation_memory" / "renpy"
+
+
+def _renpy_identity_root(project_dir: str | Path) -> Path:
+    project = Path(project_dir).resolve()
+    if project.name.lower() == "portuguese" and project.parent.name.lower() == "tl":
+        maybe_game = project.parent.parent
+        if maybe_game.name.lower() == "game":
+            return maybe_game.parent
+    if project.name.lower() == "tl" and project.parent.name.lower() == "game":
+        return project.parent.parent
+    if project.name.lower() == "game":
+        return project.parent
+    return project
+
+
+def _slugify_game_name(name: str) -> str:
+    raw = name.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    without_version = re.sub(r"-(?:v)?\d+(?:[-.]?\d+)*(?:[a-z])?(?:-.+)?$", "", slug)
+    without_suffix = re.sub(r"-(?:pc|win|windows|linux|mac|osx)$", "", without_version)
+    return without_suffix.strip("-") or slug or "renpy-game"
+
+
+def _memory_game_key(project_dir: str | Path) -> str:
+    return _slugify_game_name(_renpy_identity_root(project_dir).name)
+
+
+def _memory_path_for_project(project_dir: str | Path) -> Path:
+    return _translation_memory_root() / f"{_memory_game_key(project_dir)}.json"
+
+
+def _source_hash(source_text: str) -> str:
+    return hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+
+
+def _load_translation_memory(project_dir: str | Path) -> dict:
+    path = _memory_path_for_project(project_dir)
+    if not path.exists() or not path.is_file():
+        return {
+            "schema_version": 1,
+            "game_key": _memory_game_key(project_dir),
+            "entries": {},
+        }
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "schema_version": 1,
+            "game_key": _memory_game_key(project_dir),
+            "entries": {},
+        }
+    if not isinstance(data, dict):
+        data = {}
+    entries = data.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    data["schema_version"] = 1
+    data["game_key"] = str(data.get("game_key") or _memory_game_key(project_dir))
+    data["entries"] = entries
+    return data
+
+
+def _save_translation_memory(project_dir: str | Path, memory: dict) -> Path:
+    path = _memory_path_for_project(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _memory_entry_for_source(memory: dict, source_text: str) -> dict | None:
+    entry = memory.get("entries", {}).get(_source_hash(source_text))
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("source") != source_text:
+        return None
+    translation = entry.get("translation")
+    if not isinstance(translation, str):
+        return None
+    return entry
+
+
+def _remove_export_plan(workspace: Path) -> None:
+    plan_path = workspace / EXPORT_PLAN_FILENAME
+    try:
+        if plan_path.exists():
+            plan_path.unlink()
+    except OSError:
+        pass
+
+
+def _load_export_plan(workspace: Path) -> dict | None:
+    plan_path = workspace / EXPORT_PLAN_FILENAME
+    if not plan_path.exists() or not plan_path.is_file():
+        return None
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        return None
+    return data
 
 
 def resolve_renpy_portuguese_dir(project_dir: str | Path) -> Path | None:
@@ -197,8 +319,28 @@ def restaurar_placeholders(text: str, phs: list[str]) -> str:
     return text
 
 
+def _escape_renpy_inner_quotes(text: str) -> str:
+    escaped: list[str] = []
+    for index, char in enumerate(text):
+        if char != '"':
+            escaped.append(char)
+            continue
+
+        slash_count = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            slash_count += 1
+            cursor -= 1
+
+        if slash_count % 2 == 0:
+            escaped.append("\\")
+        escaped.append(char)
+
+    return "".join(escaped)
+
+
 def corrigir_aspas(text: str) -> str:
-    text = re.sub(r'(?<!\\)"', r'\\"', text)
+    text = _escape_renpy_inner_quotes(text)
     text = re.sub(r'\\"(\[.*?\])\\"', r"'\1'", text)
     return text
 
@@ -379,7 +521,12 @@ def reintegrar(path: Path, traducoes: list[str], ph_map: list[list[str]], log: T
         f.writelines(new_lines)
 
 
-def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobResult:
+def exportar_renpy(
+    project_dir: str | Path,
+    workspace_dir: str | Path,
+    *,
+    use_translation_memory: bool = True,
+) -> JobResult:
     project = Path(project_dir)
     workspace = ensure_directory(workspace_dir)
 
@@ -403,6 +550,15 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
     translations_path = workspace / TRANSLATIONS_FILENAME
     placeholders_path = workspace / PLACEHOLDERS_FILENAME
     map_path = workspace / MAP_FILENAME
+    plan_path = workspace / EXPORT_PLAN_FILENAME
+    memory = _load_translation_memory(project) if use_translation_memory else None
+    total_texts = sum(
+        sum(1 for texto in textos if texto != "")
+        for _relpath, textos, _placeholders in export_entries
+    )
+    reused_count = 0
+    new_count = 0
+    plan_files: list[dict] = []
 
     with translations_path.open("w", encoding="utf-8-sig") as f_txt, placeholders_path.open(
         "w", encoding="utf-8-sig"
@@ -410,27 +566,218 @@ def exportar_renpy(project_dir: str | Path, workspace_dir: str | Path) -> JobRes
         for i, (relpath, textos, placeholders) in enumerate(export_entries):
             chave_arquivo = f"ARQUIVO_{i:03d}"
             mapa_arquivos[chave_arquivo] = relpath
+            visible_texts: list[str] = []
+            visible_placeholders: list[list[str]] = []
+            plan_items: list[dict] = []
+
+            for idx_t, texto in enumerate(textos):
+                phs = placeholders[idx_t]
+                # A comment such as "# voice" occupies a reintegration slot but is not dialogue.
+                if texto == "":
+                    plan_items.append(
+                        {
+                            "status": "skip",
+                            "source": "",
+                            "placeholders": phs,
+                        }
+                    )
+                    continue
+                hash_value = _source_hash(texto)
+                memory_entry = _memory_entry_for_source(memory, texto) if memory else None
+                if memory_entry is not None:
+                    reused_count += 1
+                    plan_items.append(
+                        {
+                            "status": "memory",
+                            "source": texto,
+                            "hash": hash_value,
+                            "translation": memory_entry["translation"],
+                            "placeholders": phs,
+                        }
+                    )
+                    continue
+
+                new_count += 1
+                visible_texts.append(texto)
+                visible_placeholders.append(phs)
+                plan_items.append(
+                    {
+                        "status": "new",
+                        "source": texto,
+                        "hash": hash_value,
+                        "new_index": len(visible_texts) - 1,
+                        "placeholders": phs,
+                    }
+                )
+
+            plan_files.append({"key": chave_arquivo, "relpath": relpath, "items": plan_items})
+            output_texts = visible_texts if use_translation_memory else textos
+            output_placeholders = visible_placeholders if use_translation_memory else placeholders
 
             f_txt.write(f"=== {chave_arquivo} ===\n")
-            for idx_t, texto in enumerate(textos):
+            for idx_t, texto in enumerate(output_texts):
                 f_txt.write(texto)
-                if idx_t < len(textos) - 1:
+                if idx_t < len(output_texts) - 1:
                     f_txt.write("\n\n")
             f_txt.write("\n\n")
 
             f_ph.write(f"=== {chave_arquivo} ===\n")
-            for phs in placeholders:
+            for phs in output_placeholders:
                 f_ph.write("|||".join(phs) + "\n")
             f_ph.write("\n")
 
     with map_path.open("w", encoding="utf-8") as f_map:
         json.dump(mapa_arquivos, f_map, indent=4, ensure_ascii=False)
 
+    generated_files = [str(translations_path), str(placeholders_path), str(map_path)]
+    warnings: list[str] = []
+    if use_translation_memory:
+        plan = {
+            "schema_version": 1,
+            "game_key": _memory_game_key(project),
+            "memory_path": str(_memory_path_for_project(project)),
+            "total_texts": total_texts,
+            "reused_count": reused_count,
+            "new_count": new_count,
+            "created_at": _utc_now_iso(),
+            "files": plan_files,
+        }
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        generated_files.append(str(plan_path))
+        warnings.append(
+            f"Memória Ren'Py: {total_texts} fala(s), {reused_count} reaproveitada(s), {new_count} nova(s)."
+        )
+    else:
+        _remove_export_plan(workspace)
+
     return JobResult(
         success=True,
         message=f"Exportação Ren'Py concluída ({len(export_entries)} arquivos).",
-        generated_files=[str(translations_path), str(placeholders_path), str(map_path)],
+        warnings=warnings,
+        generated_files=generated_files,
     )
+
+
+def expected_new_counts_from_plan(workspace_dir: str | Path) -> dict[str, int] | None:
+    plan = _load_export_plan(Path(workspace_dir))
+    if plan is None:
+        return None
+    counts: dict[str, int] = {}
+    for file_entry in plan.get("files", []):
+        if not isinstance(file_entry, dict):
+            continue
+        key = str(file_entry.get("key") or "")
+        items = file_entry.get("items")
+        if not key or not isinstance(items, list):
+            continue
+        counts[key] = sum(1 for item in items if isinstance(item, dict) and item.get("status") == "new")
+    return counts
+
+
+def _build_full_translations_from_plan(
+    plan: dict,
+    t_map: dict[str, list[str]],
+) -> tuple[dict[str, list[str]], dict[str, list[list[str]]], list[str]]:
+    full_translations: dict[str, list[str]] = {}
+    full_placeholders: dict[str, list[list[str]]] = {}
+    warnings: list[str] = []
+
+    for file_entry in plan.get("files", []):
+        if not isinstance(file_entry, dict):
+            continue
+        key = str(file_entry.get("key") or "")
+        items = file_entry.get("items")
+        if not key or not isinstance(items, list):
+            continue
+
+        new_translations = t_map.get(key, [])
+        new_cursor = 0
+        full_translations[key] = []
+        full_placeholders[key] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            placeholders = item.get("placeholders")
+            if not isinstance(placeholders, list):
+                placeholders = []
+            clean_placeholders = [str(ph) for ph in placeholders]
+            status = item.get("status")
+
+            if status == "skip":
+                translation = str(item.get("source") or "")
+            elif status == "memory":
+                translation = item.get("translation")
+                if not isinstance(translation, str):
+                    translation = str(item.get("source") or "")
+                    warnings.append(f"Chave {key}: item reaproveitado sem tradução; usando texto original.")
+            else:
+                if new_cursor >= len(new_translations):
+                    translation = str(item.get("source") or "")
+                    warnings.append(f"Chave {key}: tradução nova ausente no índice {new_cursor}; usando texto original.")
+                else:
+                    translation = new_translations[new_cursor]
+                new_cursor += 1
+
+            full_translations[key].append(translation)
+            full_placeholders[key].append(clean_placeholders)
+
+        if new_cursor < len(new_translations):
+            warnings.append(
+                f"Chave {key}: {len(new_translations) - new_cursor} tradução(ões) extra(s) ignorada(s)."
+            )
+
+    return full_translations, full_placeholders, warnings
+
+
+def _update_translation_memory_from_import(
+    project: Path,
+    plan: dict,
+    full_translations: dict[str, list[str]],
+) -> Path:
+    memory = _load_translation_memory(project)
+    entries = memory.setdefault("entries", {})
+    now = _utc_now_iso()
+
+    for file_entry in plan.get("files", []):
+        if not isinstance(file_entry, dict):
+            continue
+        key = str(file_entry.get("key") or "")
+        relpath = str(file_entry.get("relpath") or "")
+        items = file_entry.get("items")
+        translations = full_translations.get(key, [])
+        if not key or not isinstance(items, list):
+            continue
+
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict) or idx >= len(translations):
+                continue
+            source = str(item.get("source") or "")
+            if not source:
+                continue
+            entry_hash = _source_hash(source)
+            previous = entries.get(entry_hash)
+            if not isinstance(previous, dict):
+                previous = {}
+            created_at = str(previous.get("created_at") or now)
+            raw_use_count = previous.get("use_count")
+            use_count = raw_use_count if isinstance(raw_use_count, int) else 0
+            placeholders = item.get("placeholders")
+            if not isinstance(placeholders, list):
+                placeholders = []
+            entries[entry_hash] = {
+                "source": source,
+                "translation": translations[idx],
+                "placeholders": [str(ph) for ph in placeholders],
+                "last_relpath": relpath,
+                "use_count": use_count + 1,
+                "created_at": created_at,
+                "updated_at": now,
+            }
+
+    memory["game_key"] = _memory_game_key(project)
+    memory["updated_at"] = now
+    return _save_translation_memory(project, memory)
 
 
 def importar_renpy(
@@ -455,11 +802,23 @@ def importar_renpy(
 
     t_map = carregar_traducoes_global(translated_path)
     p_map = carregar_placeholders_global(placeholders_path)
+    plan = _load_export_plan(workspace)
+    plan_warnings: list[str] = []
+    if plan is not None:
+        if plan.get("game_key") != _memory_game_key(project):
+            return JobResult(
+                success=False,
+                message=(
+                    "O plano de memória Ren'Py não pertence ao projeto selecionado. "
+                    "Execute uma nova exportação antes de importar."
+                ),
+            )
+        t_map, p_map, plan_warnings = _build_full_translations_from_plan(plan, t_map)
 
     with map_path.open("r", encoding="utf-8") as f_map:
         mapa_arquivos: dict[str, str] = json.load(f_map)
 
-    warnings: list[str] = []
+    warnings: list[str] = list(plan_warnings)
 
     targets: list[Path] = []
     key_to_target: dict[str, Path] = {}
@@ -499,9 +858,18 @@ def importar_renpy(
 
             reintegrar(full, t_map[chave], p_tags, log)
 
+    memory_path: Path | None = None
+    if plan is not None:
+        try:
+            memory_path = _update_translation_memory_from_import(project, plan, t_map)
+        except OSError as exc:
+            warnings.append(f"Não foi possível atualizar a memória Ren'Py: {exc}")
+
     message = "Importação Ren'Py concluída."
     if backup_dir:
         message += f" Backup criado em: {backup_dir}"
+    if memory_path:
+        message += f" Memória atualizada em: {memory_path}"
 
     return JobResult(
         success=True,
